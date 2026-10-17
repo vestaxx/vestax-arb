@@ -23,6 +23,7 @@ const TENNIS_ON = Bun.env.ARB_TENNIS === "1";
 const ESPORTS_ON = Bun.env.ARB_ESPORTS_OFF !== "1";
 const FEED_MAX_PCT = Number(Bun.env.ARB_FEED_MAX_PCT ?? 8);
 const BVD_LIVE = Bun.env.BVD_LIVE === "1";
+let bvdLiveDiagN = 0;
 const GEM_OFF = Bun.env.GEMINI_OFF === "1";
 const GEM_FEE = 0.07;
 const START_TOL_MS = Number(Bun.env.ARB_START_TOL_MIN ?? 120) * 60000;
@@ -791,8 +792,21 @@ function bvdCollect(ev: any, live: boolean, teams: string[], alt: boolean, out: 
 function bvdParse(ev: any, league: string): FeedEv | null {
   if (ev?.type && ev.type !== "GAMEEVENT") return null;
   const live = !!ev?.live;
-  if (live && !BVD_LIVE) return null;
-  if (live && !(Date.now() - Number(ev.lastModified) <= 20000)) return null;
+  // BVD_LIVE was turned on, but every live candidate is STILL being rejected (confirmed via
+  // FEED-NOMATCH-ZERO: liveMiss = pool size, every single time, even after the toggle and a fresh
+  // restart) -- this distinguishes which of the two gates below is actually doing it, instead of
+  // assuming the toggle alone was sufficient.
+  if (live) {
+    const ageMs = Date.now() - Number(ev.lastModified);
+    if (!BVD_LIVE) {
+      if (bvdLiveDiagN < 15) { bvdLiveDiagN++; console.log(`BVD-LIVE-DIAG #${bvdLiveDiagN} rejected: BVD_LIVE is off (lastModified age ${ageMs}ms, raw=${ev.lastModified})`); }
+      return null;
+    }
+    if (!(ageMs <= 20000)) {
+      if (bvdLiveDiagN < 15) { bvdLiveDiagN++; console.log(`BVD-LIVE-DIAG #${bvdLiveDiagN} rejected: stale -- lastModified age ${ageMs}ms (limit 20000), raw lastModified=${ev.lastModified}, Date.now()=${Date.now()}`); }
+      return null;
+    }
+  }
   const st = Number(ev.startTime);
   if (!live && Number.isFinite(st) && st > 1e11 && st < Date.now() - 60000) return null;
   let teams: string[] = (ev?.competitors ?? []).map((c: any) => String(c?.name ?? "").trim()).filter(Boolean);
