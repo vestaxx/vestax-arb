@@ -486,9 +486,19 @@ function toks(s: any): string[] {
   });
   return out.filter((w) => !STOPW.has(w));
 }
+// common US college-sports shorthand: "K-State" for "Kansas State", "N.C. State"-style forms, etc. --
+// a single-letter token immediately followed by "state" is a well-known abbreviation convention, not
+// two unrelated words. Confirmed needed from a live FEED-NOMATCH: Polymarket's "K-State" vs Bovada's
+// "Kansas State" scored only 0.50 (below the 0.75 threshold) with no other overlap mechanism, even
+// though they're the same team -- toks() turns "K-State" into ["k","state"], which only shares
+// "state" with ["kansas","state"], and nothing already in sim() bridges a single-letter initial to
+// the full word it stands for.
+const abbrState = (xs: string[], ys: string[]) =>
+  xs.length === 2 && xs[1] === "state" && xs[0].length === 1 && ys.includes("state") && ys[0]?.[0] === xs[0];
 function sim(a: string, b: string): number {
   const A = toks(a), B = toks(b);
   if (!A.length || !B.length) return 0;
+  if (abbrState(A, B) || abbrState(B, A)) return 1;
   const sa = new Set(A), sb = new Set(B);
   let inter = 0;
   for (const w of sa) if (sb.has(w)) inter++;
@@ -1040,6 +1050,15 @@ async function refreshPolymarket() {
     // distinct sportsMarketType string seen, with counts) so spread/total/team-total support can be
     // built against real data. Remove once confirmed.
     const allTypesSeen: Record<string, number> = {};
+    // ALL-TYPES-DIAG (logging every m.sportsMarketType seen) came back with zero spread/total types,
+    // but arb_opps proves our OWN evalSpreads pipeline found real spread arbs as recently as Oct 12
+    // (opp_keys like "S|asc-nfl-bal-atl-2026-10-11-pos-4pt5|l" -- a market slug with the point-spread
+    // line embedded directly in it, "asc-" prefixed, distinct from the moneyline's "aec-" prefix) --
+    // and the person's own screenshot shows a live Polymarket spread market right now. So the type
+    // string assumption itself may be wrong for this market, not just its exact value: dump the RAW
+    // market object (every field) the first few times a market's slug matches that distinct spread
+    // naming pattern, bypassing m.sportsMarketType entirely, to see what actually distinguishes it.
+    let spreadSlugDiagN = 0;
     let pages = 0, total = 0, nameSkipped = 0;
     for (let off = 0; off < 8000; off += 200) {
       const r = await pm.events.list({ active: true, closed: false, limit: 200, offset: off });
@@ -1056,6 +1075,10 @@ async function refreshPolymarket() {
         const tots: any[] = [];
         const sps: any[] = [];
         for (const m of ev.markets ?? []) {
+          if (spreadSlugDiagN < 8 && /-pos-\d|-neg-\d/.test(String(m.slug ?? ""))) {
+            spreadSlugDiagN++;
+            console.log(`SPREAD-SLUG-DIAG #${spreadSlugDiagN} raw market: ${JSON.stringify(m)}`);
+          }
           const t = String(m.sportsMarketType ?? "");
           if (!t) continue;
           allTypesSeen[t] = (allTypesSeen[t] ?? 0) + 1;
