@@ -903,6 +903,7 @@ let pmNameGames: any[] = [];
 // market's worth of team-name data per event (fine for every other sport, which never has more
 // than one qualifying winner-type market per event, but wrong here).
 let pmMapGames: { slug: string; mapNum: number; Ld: string; Sd: string; Lv: string[]; Sv: string[]; evTitle: string; evSlug: string; startTime: string | null; live: boolean; fem: boolean }[] = [];
+const MAP_NOMATCH_LOGGED = new Set<string>();
 let pmCatAt = 0;
 let pmRefreshing = false;
 const slimEv = (ev: any) => ({ id: String(ev.id), startTime: ev.startTime ?? null, live: !!ev.live, title: String(ev.title ?? ""), slug: String(ev.slug ?? "") });
@@ -1030,7 +1031,7 @@ async function refreshPolymarket() {
     pmNameGames = nameGames;
     pmMapGames = mapGames;
     pmCatAt = Date.now();
-    console.log(`Polymarket esports map games: ${mapGames.length}`);
+    console.log(`Polymarket esports map games: ${mapGames.length}${mapGames.length ? " " + JSON.stringify(mapGames.map((g) => ({ Ld: g.Ld, Sd: g.Sd, mapNum: g.mapNum, live: g.live, start: g.startTime }))) : ""}`);
     console.log(`Polymarket catalogue: ${total} events over ${pages} page(s), ${games.length} id-matched winner markets ${JSON.stringify(kept)}`);
     console.log(`Polymarket team-name games: ${nameGames.length} ${JSON.stringify(nameTypes)} (skipped ${nameSkipped} with !=2 teams) | mem ${Math.round(process.memoryUsage().rss / 1048576)}MB`);
     console.log(`Polymarket totals kept ${JSON.stringify(totKept)}, skipped no-overtime-text ${totSkip.noOT}, other ${totSkip.other}; ${nameGames.filter((g) => g.tots.length).length} games have totals`);
@@ -1271,18 +1272,25 @@ async function scan(): Promise<number> {
     const isLiveP = pg.live;
     const startP = Date.parse(pg.startTime ?? "");
     if (!isLiveP && !(startP > Date.now() - 600000 && startP - Date.now() < PRE_WINDOW_MS)) return;
-    let best: any = null, bestSc = 0, flip = false;
+    let best: any = null, bestSc = 0, flip = false, bestAny: any = null, bestAnySc = 0;
     for (const e of bovadaEsports) {
       if (e.live !== isLiveP) continue;
-      if (!e.mapMl?.[pg.mapNum]) continue;
       const [c1, c2] = e.teams;
       const l1 = bestSim(pg.Lv, [c1]), s2 = bestSim(pg.Sv, [c2]), l2 = bestSim(pg.Lv, [c2]), s1 = bestSim(pg.Sv, [c1]);
       const straight = l1 + s2, flipped = l2 + s1, sc = Math.max(straight, flipped);
+      if (sc > bestAnySc) { bestAnySc = sc; bestAny = e; }
+      if (!e.mapMl?.[pg.mapNum]) continue;
       const lo = (flipped > straight ? Math.min(l2, s1) : Math.min(l1, s2));
       if (lo < 0.75) continue;
       if (sc > bestSc) { bestSc = sc; best = e; flip = flipped > straight; }
     }
-    if (!best) return;
+    if (!best) {
+      if (!MAP_NOMATCH_LOGGED.has(pg.slug)) {
+        MAP_NOMATCH_LOGGED.add(pg.slug);
+        console.log(`MAP-NOMATCH ${pg.Ld} vs ${pg.Sd} · Map ${pg.mapNum} | live=${isLiveP} | bovadaEsports=${bovadaEsports.length} | best any-team-match="${bestAny?.teams?.join(" vs ") ?? "-"}" sc=${bestAnySc.toFixed(2)} hasMapMl(${pg.mapNum})=${!!bestAny?.mapMl?.[pg.mapNum]} mapMlKeys=${bestAny?.mapMl ? JSON.stringify(Object.keys(bestAny.mapMl)) : "-"}`);
+      }
+      return;
+    }
     const [n0, n1] = flip ? [best.teams[1], best.teams[0]] : best.teams;
     const mapOdds = best.mapMl![pg.mapNum];
     const dGtL = mapOdds[n0], dGtS = mapOdds[n1];
