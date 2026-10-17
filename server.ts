@@ -904,6 +904,7 @@ let pmNameGames: any[] = [];
 // than one qualifying winner-type market per event, but wrong here).
 let pmMapGames: { slug: string; mapNum: number; Ld: string; Sd: string; Lv: string[]; Sv: string[]; evTitle: string; evSlug: string; startTime: string | null; live: boolean; fem: boolean }[] = [];
 const MAP_NOMATCH_LOGGED = new Set<string>();
+let bvdTtDiagN = 0;
 let pmCatAt = 0;
 let pmRefreshing = false;
 const slimEv = (ev: any) => ({ id: String(ev.id), startTime: ev.startTime ?? null, live: !!ev.live, title: String(ev.title ?? ""), slug: String(ev.slug ?? "") });
@@ -982,15 +983,20 @@ async function refreshPolymarket() {
           if (isTennis && !TENNIS_ON) continue;
           if (isEsports && !ESPORTS_ON) continue;
           if (BAD_TYPE.test(t)) continue;
-          // table tennis gets the same Sportradar-ID fallback as tennis/esports. Confirmed root cause
-          // of table tennis never once matching despite 40+ PM markets and 150+ Goated events existing
-          // side by side: pid() (PM's OddsAPI provider ID) resolves to something non-empty for table
-          // tennis sides, so idOf() was returning truthy and these markets got counted in `kept` --
-          // but Goated's own competitor IDs are uniformly Sportradar IDs (see refreshGoated, which
-          // strips "sr:competitor:" for every sport, not just tennis/esports), so the OddsAPI id never
-          // actually lined up with any gtEvents key. No log ever caught it because this id-matched
-          // fast-path exits (`continue`/`picked=true`) before the fuzzy name-matching fallback that
-          // would otherwise have logged a NAME-NOMATCH.
+          // table tennis gets the same Sportradar-ID fallback as tennis/esports -- theory, not yet
+          // confirmed against real data the way the tennis/esports fallback was. A first attempt at
+          // this fix (adding isTableTennis to the OR-fallback) turned out to be a no-op in practice:
+          // pid(s) was already non-empty for table tennis sides pre-fix (that's why kept[t] already
+          // counted 48 of them), and `pid(s) || srId(s)` short-circuits on that truthy value before
+          // srId() ever runs. So either pid()'s value is simply the wrong namespace for table tennis
+          // (doesn't align with Goated's Sportradar-keyed events) and srId should take priority, or
+          // the mismatch is somewhere else entirely (e.g. Goated's table tennis events failing the
+          // comps.length===2 check in refreshGoated). Diagnostic below checks the first case directly
+          // before changing anything further -- remove once the real cause is confirmed.
+          if (isTableTennis && bvdTtDiagN < 20 && L) {
+            bvdTtDiagN++;
+            console.log(`TT-ID-DIAG #${bvdTtDiagN} L.desc=${JSON.stringify(L.description)} pid(L)=${JSON.stringify(pid(L))} srId(L)=${JSON.stringify(srId(L))} providerIds=${JSON.stringify(L?.team?.providerIds ?? [])}`);
+          }
           const idOf = (s: any) => pid(s) || (isTennis || isEsports || isTableTennis ? srId(s) : "");
           if (!L || !idOf(L)) continue;
           if (sides.length === 2 && S && idOf(S) && idOf(L) !== idOf(S)) {
