@@ -446,6 +446,12 @@ let gtEvents = new Map<string, any>();
 let gtTeamList: any[] = [];
 let gtCatAt = 0;
 let gtTtDiagN = 0;
+// full pool of competitor ids seen across every Goated table tennis event (not just paired ones --
+// pairKey requires an exact pair match, which is stricter than "does this id exist anywhere in
+// Goated's table tennis competitor pool at all"). Used by the overlap diagnostic below to answer,
+// with real evidence rather than eyeballing a handful of samples, whether PM's and Goated's id
+// schemes for table tennis can ever line up.
+let gtTtAllIds = new Set<string>();
 async function refreshGoated() {
   if (Date.now() - gtCatAt < 240000 && gtEvents.size) return;
   const sports = (await gt("/listing/sports?lang=en")) ?? [];
@@ -464,6 +470,7 @@ async function refreshGoated() {
     } catch (e: any) { console.error("goated sport failed", sp.slug, e?.message ?? e); }
   });
   const m = new Map<string, any>();
+  const ttIds = new Set<string>();
   await pool(tourns, 4, async (t) => {
     try {
       for (const e of (await gt(`/listing/tournament/${t.slug}/all-events?lang=en`)) ?? []) {
@@ -476,6 +483,7 @@ async function refreshGoated() {
           console.log(`GT-TT-ID-DIAG #${gtTtDiagN} league=${JSON.stringify(t.name)} competitors=${JSON.stringify((e.competitors ?? []).map((c: any) => ({ name: c.name, external_id: c.external_id })))}`);
         }
         const comps = (e.competitors ?? []).map((c: any) => ({ id: String(c.external_id ?? "").replace(/^sr:competitor:/, ""), q: c.qualifier, name: c.name }));
+        if (t.sport.name === "Table Tennis") for (const c of comps) if (c.id) ttIds.add(c.id);
         if (comps.length !== 2 || comps.some((c: any) => !c.id)) continue;
         const url = t.cslug ? `https://www.goated.com/sports/${t.sport.slug}/${t.cslug}/${t.slug}/${e.slug}` : `https://www.goated.com/sports/${t.sport.slug}`;
         m.set(pairKey(comps[0].id, comps[1].id), { slug: e.slug, status: e.status, scheduled: e.scheduled, league: t.name, sport: t.sport, comps, url });
@@ -483,6 +491,7 @@ async function refreshGoated() {
     } catch (e: any) { console.error("goated tournament failed", t.slug, e?.message ?? e); }
   });
   gtEvents = m;
+  gtTtAllIds = ttIds;
   gtTeamList = [...m.values()].filter((e) => TEAM_SPORTS.test(e.sport.name));
   gtCatAt = Date.now();
   const per: Record<string, number> = {};
@@ -1037,7 +1046,13 @@ async function refreshPolymarket() {
             }
           }
           if (g) {
-            g.sport = /basketball|nba|ncaab|cbb/i.test(g.t) ? /basketball/i : /baseball|mlb/i.test(g.t) ? /baseball/i : /football|nfl|ncaaf/i.test(g.t) ? /football/i : /hockey|nhl/i.test(g.t) ? /hockey/i : /esports/i.test(g.t) ? /esports/i : /soccer/i.test(g.t) ? /soccer/i : null;
+            // Goated's actual sport names are "ESport Counter-Strike" / "ESport Dota" (confirmed in
+            // the RAW GOATED SPORTS catalogue dump) -- singular "esport", no trailing s. The filter
+            // regex below is tested against those names in matchName(), so matching on /esports/i
+            // (plural, from PM's own "esports_..." market-type naming) silently excluded every
+            // single Goated esports event from ever being considered a candidate match. /esport/i
+            // (no trailing s) is a substring of both namings and matches either correctly.
+            g.sport = /basketball|nba|ncaab|cbb/i.test(g.t) ? /basketball/i : /baseball|mlb/i.test(g.t) ? /baseball/i : /football|nfl|ncaaf/i.test(g.t) ? /football/i : /hockey|nhl/i.test(g.t) ? /hockey/i : /esports/i.test(g.t) ? /esport/i : /soccer/i.test(g.t) ? /soccer/i : null;
             g.fem = [...g.Ln, ...g.Sn, g.Lf, g.Sf, g.ev.title].some(isFem);
             g.tots = tots;
             g.sps = sps;
@@ -1247,6 +1262,12 @@ async function scan(): Promise<number> {
       }
     }
   });
+  if (diag) {
+    const tt = pmGames.filter((g) => /^table_tennis/i.test(String(g.t)));
+    const anySide = tt.filter((g) => gtTtAllIds.has(g.lid) || gtTtAllIds.has(g.sid)).length;
+    const bothSides = tt.filter((g) => gtTtAllIds.has(g.lid) && gtTtAllIds.has(g.sid)).length;
+    console.log(`TT-ID-OVERLAP: ${tt.length} PM table tennis games | ${anySide} with >=1 side's id present in Goated's table tennis pool (${gtTtAllIds.size} ids) | ${bothSides} with both sides present | ${gtEvents.size ? "" : "(gtEvents empty)"}`);
+  }
   let nmMatched = 0, nmUnmatched = 0, nmLogs = 0;
   await pool(pmNameGames, 6, async (g) => {
     const isLiveP = !!g.ev.live;
