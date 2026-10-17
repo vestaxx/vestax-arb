@@ -29,7 +29,13 @@ const START_TOL_MS = Number(Bun.env.ARB_START_TOL_MIN ?? 120) * 60000;
 let logoCache: Uint8Array | null = null;
 
 const BLOCKED = (Bun.env.ARB_BLOCKED_LEAGUES ?? "czechligapro,wtt").toLowerCase().split(",").map((s) => s.trim()).filter(Boolean);
-const isBlocked = (evSlug: any, mkSlug: any, league: any) => {
+// table tennis is explicitly exempt from league blocking, regardless of what BLOCKED currently
+// contains -- user-requested: no table tennis game should ever be filtered out by this mechanism.
+// Table tennis only ever reaches pmGames (the id-matched array; its market type never satisfies
+// NAME_TYPE, so it never appears in pmNameGames), so this only needs checking at those two call
+// sites, both of which already have g.t ("table_tennis_match_winner" etc.) on hand.
+const isBlocked = (evSlug: any, mkSlug: any, league: any, pmType?: any) => {
+  if (/^table_tennis/i.test(String(pmType ?? ""))) return false;
   const es = String(evSlug ?? "").toLowerCase(), ms = String(mkSlug ?? "").toLowerCase();
   const lg = String(league ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
   return BLOCKED.some((b) => es.includes(b) || ms.includes("-" + b + "-") || lg.includes(b));
@@ -439,6 +445,7 @@ let gtSports: { slug: string; name: string; winnerId: string }[] = [];
 let gtEvents = new Map<string, any>();
 let gtTeamList: any[] = [];
 let gtCatAt = 0;
+let gtTtDiagN = 0;
 async function refreshGoated() {
   if (Date.now() - gtCatAt < 240000 && gtEvents.size) return;
   const sports = (await gt("/listing/sports?lang=en")) ?? [];
@@ -460,6 +467,14 @@ async function refreshGoated() {
   await pool(tourns, 4, async (t) => {
     try {
       for (const e of (await gt(`/listing/tournament/${t.slug}/all-events?lang=en`)) ?? []) {
+        // one-time raw dump of Goated's table tennis competitor id scheme, to compare directly
+        // against Polymarket's (which carries no Sportradar id at all for table tennis -- see
+        // TT-ID-DIAG) -- need to know what format Goated's own external_id takes here before
+        // picking a fix. Remove once confirmed.
+        if (t.sport.name === "Table Tennis" && gtTtDiagN < 15) {
+          gtTtDiagN++;
+          console.log(`GT-TT-ID-DIAG #${gtTtDiagN} league=${JSON.stringify(t.name)} competitors=${JSON.stringify((e.competitors ?? []).map((c: any) => ({ name: c.name, external_id: c.external_id })))}`);
+        }
         const comps = (e.competitors ?? []).map((c: any) => ({ id: String(c.external_id ?? "").replace(/^sr:competitor:/, ""), q: c.qualifier, name: c.name }));
         if (comps.length !== 2 || comps.some((c: any) => !c.id)) continue;
         const url = t.cslug ? `https://www.goated.com/sports/${t.sport.slug}/${t.cslug}/${t.slug}/${e.slug}` : `https://www.goated.com/sports/${t.sport.slug}`;
@@ -1204,14 +1219,14 @@ async function scan(): Promise<number> {
   };
   await pool(pmGames, 6, async (g) => {
     const ge = gtEvents.get(pairKey(g.lid, g.sid));
-    if (ge && !isBlocked(g.ev.slug, g.wm.slug, ge.league)) {
+    if (ge && !isBlocked(g.ev.slug, g.wm.slug, ge.league, g.t)) {
       const isLive = !!g.ev.live || ge.status === "live";
       const start = Date.parse(g.ev.startTime ?? ge.scheduled ?? "");
       if (isLive || (start > Date.now() - 600000 && start - Date.now() < PRE_WINDOW_MS)) queue({ ...g, ge, live: isLive, start }, isLive);
     } else if (ge) blockedN++;
     const sP = Date.parse(g.ev.startTime ?? ""), lP = !!g.ev.live;
     const kind = kindOf(g);
-    if (kind && !isBlocked(g.ev.slug, g.wm.slug, ge?.league) && (lP || (sP > Date.now() - 600000 && sP - Date.now() < PRE_WINDOW_MS))) {
+    if (kind && !isBlocked(g.ev.slug, g.wm.slug, ge?.league, g.t) && (lP || (sP > Date.now() - 600000 && sP - Date.now() < PRE_WINDOW_MS))) {
       const fb = await addFeedJobs(g, sP, lP);
       const cross: CrossEntry[] = [];
       if (ge) {
