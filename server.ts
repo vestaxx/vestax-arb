@@ -986,7 +986,12 @@ function matchFeed(g: any, evs: FeedEv[], startP: number, kind: string): { ev: F
       const gKey = (Ln[0] ?? "") + "|" + (Sn[0] ?? "") + "|" + (b1.e.teams[0] ?? "") + "|" + (b1.e.teams[1] ?? "");
       if (!FEED_NOMATCH_LOGGED.has(gKey)) {
         FEED_NOMATCH_LOGGED.add(gKey);
-        const why = b1.amb ? "ORIENTATION-AMBIGUOUS" : b1.lo < 0.75 ? "low similarity" : "runner-up too close";
+        // check low-similarity FIRST: amb (|straight - flipped| < 0.2) is trivially true whenever
+        // both orientations score zero, i.e. there was no real candidate at all -- that must not be
+        // mislabeled as an ambiguity between two genuine candidates (confirmed: every early firing
+        // of this log was sum=0.00/min=0.00 European-league games with no Bovada coverage at all,
+        // correctly rejected, just mislabeled).
+        const why = b1.lo < 0.75 ? "low similarity" : b1.amb ? "ORIENTATION-AMBIGUOUS" : "runner-up too close";
         console.log(`FEED-NOMATCH ${Ln[0]} vs ${Sn[0]} | best "${b1.e.teams[0]}" vs "${b1.e.teams[1]}" sum=${b1.sc.toFixed(2)} min=${b1.lo.toFixed(2)} runnerUp=${b2.toFixed(2)} reason=${why}`);
       }
     }
