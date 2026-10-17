@@ -297,14 +297,23 @@ async function pmDepth(slug: string, long: boolean, dPm: number, dGt: number, to
   const maxRaw = breakEvenPrice((Sg + C) / Sg);
   const need = Math.max(MIN_LIQ_USD, C * LIQ_CUSHION);
   let levels: { p: number; q: number }[] = [];
+  let fetchFailed = false;
   try {
     const d = (await pm.markets.book(slug))?.marketData;
     const raw = long ? (d?.offers ?? d?.asks ?? []) : (d?.bids ?? []);
     levels = (Array.isArray(raw) ? raw : []).map(bookLevel).filter(Boolean) as { p: number; q: number }[];
     if (!long) levels = levels.map((l) => ({ p: 1 - l.p, q: l.q }));
     levels.sort((a, b) => a.p - b.p);
-  } catch (e: any) { console.error("book failed", slug, e?.message ?? e); }
-  if (!levels.length) return { ok: topLiq >= need * 2, depth: topLiq, need };
+  } catch (e: any) { console.error("book failed", slug, e?.message ?? e); fetchFailed = true; }
+  // an empty `levels` array means two very different things, and treating them the same is exactly
+  // the bug that let repeated unhedged naked bets through on thin basketball markets overnight: the
+  // live book fetch can genuinely succeed and come back empty (no resting asks at all -- real,
+  // thin-market risk, confirmed via live TRADE logs showing "nothing more was available at or below
+  // the limit" immediately after this check passed), or the fetch itself can throw (a transient API
+  // hiccup, unrelated to whether liquidity actually exists). Only the second case is safe to wave
+  // through on the old topLiq estimate from scan time; the first means there is nothing there right
+  // now and must be treated as not-ok, regardless of how much liquidity scan time thought it saw.
+  if (!levels.length) return fetchFailed ? { ok: topLiq >= need * 2, depth: topLiq, need } : { ok: false, depth: 0, need };
   let depth = 0;
   for (const l of levels) { if (l.p > maxRaw) break; depth += l.q * costPerShare(l.p); }
   const fill = walkBuy(levels, maxRaw, C);
@@ -1457,7 +1466,10 @@ async function scan(): Promise<number> {
         const matchup = `${j.L.description} vs ${j.S.description}`;
         noteClose(pct, `Total ${t.line}: ${matchup} (${j.ge.sport.name})`);
         if (pct <= 0) continue;
-        if (j.feed && pct > FEED_MAX_PCT) { capSkip++; continue; }
+        // this cap applies regardless of source (feed-matched or the direct Polymarket-vs-Goated
+        // id/name-matched path) -- see the comment on the moneyline check below for why the old
+        // `j.feed &&` gate here was a real gap, not a deliberate scope limit.
+        if (pct > FEED_MAX_PCT) { capSkip++; continue; }
         const dp = await pmDepth(t.slug, c.side === "o", dPm, c.gtOdds, liq);
         if (!dp.ok) { lqSkip++; continue; }
         const key = "T|" + t.slug + "|" + c.side + sfx;
@@ -1533,7 +1545,8 @@ async function scan(): Promise<number> {
         const pct = (1 / (1 / dPm + 1 / c.gtOdds) - 1) * 100;
         noteClose(pct, `Spread ${T.name} ${fmtH(t.hL)}: ${matchup} (${j.ge.sport.name})`);
         if (pct <= 0) continue;
-        if (j.feed && pct > FEED_MAX_PCT) { capSkip++; continue; }
+        // see the comment on the moneyline check below -- this cap must apply regardless of source
+        if (pct > FEED_MAX_PCT) { capSkip++; continue; }
         const dp = await pmDepth(t.slug, pmLong, dPm, c.gtOdds, liq);
         if (!dp.ok) { lqSkip++; continue; }
         const key = "S|" + t.slug + "|" + c.side + sfx;
@@ -1605,7 +1618,19 @@ async function scan(): Promise<number> {
             const label = `${j.L.description} vs ${j.S.description} (${j.ge.sport.name})`;
             noteClose(pct, label);
             if (pct <= 0) continue;
-            if (j.feed && pct > FEED_MAX_PCT) { capSkip++; continue; }
+            // this cap used to only fire `if (j.feed)` -- i.e. only for cross-book feed matches
+            // (Bovada/Bet105/Gemini), leaving the direct Polymarket-vs-Goated id/name-matched path
+            // completely uncapped. Confirmed via the DB: every "Czech Liga Pro" table tennis arb
+            // found through that direct path (profit_pct values of 14%, 17%, 24%, 30%, 37%, 59%,
+            // 62% -- going back to Oct 10, well before table tennis was touched this session) sailed
+            // through with no sanity check at all, because a real arbitrage edge basically never
+            // exceeds FEED_MAX_PCT and a number that large almost always means two different
+            // players' odds got paired together, not real free money. The separate NAME-INSANE check
+            // above (comparing PM's price against Goated's own implied-fair price) has the same gap
+            // for table tennis specifically: it only runs `if (j.byName || sport === "tennis")`,
+            // and "Table Tennis" satisfies neither. This cap is the one of the two safe to widen
+            // unconditionally; removing j.feed here closes the gap for every path at once.
+            if (pct > FEED_MAX_PCT) { capSkip++; continue; }
             const dp = await pmDepth(j.wm.slug, leg.side === "a", dPm, dGt, leg.liq);
             if (!dp.ok) { lqSkip++; continue; }
             const key = j.wm.slug + "|" + leg.side + sfx;
