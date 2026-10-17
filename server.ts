@@ -978,12 +978,20 @@ async function refreshPolymarket() {
           }
           const isTennis = t.startsWith("tennis_");
           const isEsports = t.startsWith("esports_");
+          const isTableTennis = t.startsWith("table_tennis_");
           if (isTennis && !TENNIS_ON) continue;
           if (isEsports && !ESPORTS_ON) continue;
           if (BAD_TYPE.test(t)) continue;
-          // esports gets the same Sportradar-ID fallback as tennis, on the guess that it likely also
-          // lacks the usual odds-provider ID Polymarket uses for most other sports -- unconfirmed.
-          const idOf = (s: any) => pid(s) || (isTennis || isEsports ? srId(s) : "");
+          // table tennis gets the same Sportradar-ID fallback as tennis/esports. Confirmed root cause
+          // of table tennis never once matching despite 40+ PM markets and 150+ Goated events existing
+          // side by side: pid() (PM's OddsAPI provider ID) resolves to something non-empty for table
+          // tennis sides, so idOf() was returning truthy and these markets got counted in `kept` --
+          // but Goated's own competitor IDs are uniformly Sportradar IDs (see refreshGoated, which
+          // strips "sr:competitor:" for every sport, not just tennis/esports), so the OddsAPI id never
+          // actually lined up with any gtEvents key. No log ever caught it because this id-matched
+          // fast-path exits (`continue`/`picked=true`) before the fuzzy name-matching fallback that
+          // would otherwise have logged a NAME-NOMATCH.
+          const idOf = (s: any) => pid(s) || (isTennis || isEsports || isTableTennis ? srId(s) : "");
           if (!L || !idOf(L)) continue;
           if (sides.length === 2 && S && idOf(S) && idOf(L) !== idOf(S)) {
             kept[t] = (kept[t] ?? 0) + 1;
