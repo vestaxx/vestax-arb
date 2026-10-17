@@ -386,6 +386,11 @@ const SOCCER_WINNER_TYPE = "soccer_team_full_time_winner";
 // which "_result" never satisfies. This is likely why esports has never once appeared in any log --
 // any esports market without a usable provider ID had nothing to fall back to.
 const ESPORTS_RESULT_TYPE = "esports_match_result";
+// confirmed in real production logs this session: "esports_map_winner_2" etc. -- a specific map's
+// own winner, distinct from the full-match "esports_match_winner". Map-level moneylines carry the
+// map number right in the type string, which is what lets this get threaded through as its own
+// matching dimension (g.mapNum) without touching how every other sport/market here works.
+const ESPORTS_MAP_WINNER_TYPE = /^esports_map_winner_(\d+)$/;
 const STOPW = new Set(["the", "of", "university", "univ", "college", "fc", "men", "mens", "women", "womens"]);
 const DIR: Record<string, string[]> = { se: ["south", "east"], sw: ["south", "west"], ne: ["north", "east"], nw: ["north", "west"] };
 const isFem = (s: any) => /\b(lady|ladies|women'?s?|female)\b|\(w\)/i.test(String(s ?? ""));
@@ -528,7 +533,7 @@ async function gtMarkets(ev: any): Promise<{ winner: Record<string, number> | nu
   return { winner: gtWinnerFrom(mk, ev), totals: team ? gtTotalsFrom(mk) : (new Map() as GtTot), hand: team ? gtHandicapFrom(mk) : [] };
 }
 
-type FeedEv = { teams: [string, string]; spreads: { team: string; line: number; odds: number }[]; totals: { line: number; over?: number; under?: number }[]; ml: Record<string, number>; live: boolean; start?: number; url?: string; link?: string; league?: string; sport?: string };
+type FeedEv = { teams: [string, string]; spreads: { team: string; line: number; odds: number }[]; totals: { line: number; over?: number; under?: number }[]; ml: Record<string, number>; live: boolean; start?: number; url?: string; link?: string; league?: string; sport?: string; mapMl?: Record<number, Record<string, number>> };
 const feeds: Record<string, Map<string, { at: number; ev: FeedEv }>> = { bet105: new Map(), bovada: new Map(), gemini: new Map() };
 const FEED_BOOKS = ["bet105", "bovada", "gemini"];
 const FEED_TTL: Record<string, number> = { bet105: 100000, bovada: 30000, gemini: 45000 };
@@ -641,13 +646,31 @@ function bvdCollect(ev: any, live: boolean, teams: string[], alt: boolean, out: 
     for (const m of g.markets ?? []) {
       if (!bvdOpen(m)) continue;
       const per = m.period ?? {}, pd = String(per.description ?? "");
-      if (!(per.main === true || /^(game|match|full)/i.test(pd))) continue;
+      // esports best-of-N series: each individual map is modeled as its own period, the same
+      // mechanism Bovada uses for halves/quarters elsewhere -- "Map 2" rather than "2nd Quarter".
+      // Not confirmed against a real captured response the way the other period checks here were;
+      // check BOVADA feed logs for actual map-moneyline counts once this is live.
+      const mapM = /^map\s*(\d+)/i.exec(pd);
+      if (!(per.main === true || /^(game|match|full)/i.test(pd) || mapM)) continue;
       if (typeof per.live === "boolean" && per.live !== live) continue;
       const d = String(m.description ?? "").toLowerCase(), kd = String(m.key ?? "") + " " + d;
-      if (/team total|1st|2nd|half|quarter|period|set |games/.test(d)) continue;
+      if (!mapM && /team total|1st|2nd|half|quarter|period|set |games/.test(d)) continue;
       if (!alt && /alt/.test(d)) continue;
+      // only a map's moneyline is built out below -- a map-level spread/total would otherwise fall
+      // into the same buckets as the full-match ones further down and silently corrupt them
+      if (mapM && !(/2W-12|moneyline/i.test(kd) && !/total|spread|handicap|alt/.test(d))) continue;
       const outs: any[] = (m.outcomes ?? []).filter(bvdOpen);
       if (/2W-12|moneyline/i.test(kd) && !/total|spread|handicap|alt/.test(d)) {
+        if (mapM) {
+          // a map's own moneyline -- kept separate from the full-match ml so it never gets
+          // compared against the wrong map (or the series winner) by mistake
+          const mapNum = Number(mapM[1]);
+          if (!out.mapMl) out.mapMl = {};
+          if (!out.mapMl[mapNum]) out.mapMl[mapNum] = {};
+          const bucket = out.mapMl[mapNum];
+          for (const o of outs) { const dc = bvdNum(o?.price?.decimal); if (dc > 1 && teams.includes(String(o.description))) bucket[String(o.description)] = dc; }
+          continue;
+        }
         for (const o of outs) { const dc = bvdNum(o?.price?.decimal); if (dc > 1 && teams.includes(String(o.description))) out.ml[String(o.description)] = dc; }
       } else if (/2W-HCAP|spread|handicap|run line|puck line/i.test(kd)) {
         for (const o of outs) {
@@ -823,6 +846,12 @@ function feedMarkets(j: any): { winner: Record<string, number> | null; totals: G
 
 let pmGames: any[] = [];
 let pmNameGames: any[] = [];
+// esports map-level winner markets ("esports_map_winner_2" etc.) -- kept in their own array rather
+// than folded into pmNameGames, since a single esports event can carry a full-match winner AND
+// several per-map winners together, and the shared nameMk/nameGames machinery only keeps one
+// market's worth of team-name data per event (fine for every other sport, which never has more
+// than one qualifying winner-type market per event, but wrong here).
+let pmMapGames: { slug: string; mapNum: number; Ld: string; Sd: string; Lv: string[]; Sv: string[]; evTitle: string; evSlug: string; startTime: string | null; live: boolean; fem: boolean }[] = [];
 let pmCatAt = 0;
 let pmRefreshing = false;
 const slimEv = (ev: any) => ({ id: String(ev.id), startTime: ev.startTime ?? null, live: !!ev.live, title: String(ev.title ?? ""), slug: String(ev.slug ?? "") });
@@ -833,7 +862,7 @@ async function refreshPolymarket() {
   pmRefreshing = true;
   try {
     const seen = new Set<string>();
-    const games: any[] = [], nameGames: any[] = [];
+    const games: any[] = [], nameGames: any[] = [], mapGames: typeof pmMapGames = [];
     const kept: Record<string, number> = {}, nameTypes: Record<string, number> = {};
     const totKept: Record<string, number> = {};
     const totSkip = { noOT: 0, other: 0 };
@@ -859,6 +888,16 @@ async function refreshPolymarket() {
           if (!t) continue;
           const sides = m.marketSides ?? [];
           const L = sides.find((s: any) => s.long), S = sides.find((s: any) => !s.long);
+          const mapM = ESPORTS_MAP_WINNER_TYPE.exec(t);
+          if (mapM && L && S) {
+            mapGames.push({
+              slug: m.slug, mapNum: Number(mapM[1]), Ld: L.description, Sd: S.description,
+              Lv: variants(L), Sv: variants(S), evTitle: String(ev.title ?? ""), evSlug: String(ev.slug ?? ""),
+              startTime: ev.startTime ?? null, live: !!ev.live,
+              fem: [L.description, S.description, String(ev.title ?? "")].some(isFem),
+            });
+            continue;
+          }
           if (TOT_TYPE.test(t)) {
             const line = Number(m.line);
             const open = m.active !== false && !m.closed && m.status !== "MARKET_STATUS_RESOLVED";
@@ -938,7 +977,9 @@ async function refreshPolymarket() {
     }
     pmGames = games;
     pmNameGames = nameGames;
+    pmMapGames = mapGames;
     pmCatAt = Date.now();
+    console.log(`Polymarket esports map games: ${mapGames.length}`);
     console.log(`Polymarket catalogue: ${total} events over ${pages} page(s), ${games.length} id-matched winner markets ${JSON.stringify(kept)}`);
     console.log(`Polymarket team-name games: ${nameGames.length} ${JSON.stringify(nameTypes)} (skipped ${nameSkipped} with !=2 teams) | mem ${Math.round(process.memoryUsage().rss / 1048576)}MB`);
     console.log(`Polymarket totals kept ${JSON.stringify(totKept)}, skipped no-overtime-text ${totSkip.noOT}, other ${totSkip.other}; ${nameGames.filter((g) => g.tots.length).length} games have totals`);
@@ -1168,6 +1209,76 @@ async function scan(): Promise<number> {
     nmMatched++;
     const isLive = isLiveP || mt.ge.status === "live";
     queue({ ev: g.ev, wm: g.wm, L: { description: g.Lf || g.Ld }, S: { description: g.Sf || g.Sd }, lid: mt.lid, sid: mt.sid, ge: mt.ge, live: isLive, start: startP, byName: true, ptype: g.t, tots: g.tots, sps: g.sps }, isLive);
+  });
+  // esports map-level moneylines vs Bovada, entirely separate from the shared jobs pipeline above --
+  // deliberately isolated (own matching, own math, own opp_key prefix "ME|") so a mistake here can't
+  // touch any other sport. Bovada-only: no other feed book has confirmed per-map esports data, and
+  // Goated doesn't carry esports map lines at all.
+  let mapMatchedN = 0;
+  const bovadaEsports = feedLive("bovada").filter((e) => e.sport === "esports" && e.mapMl);
+  await pool(pmMapGames, 6, async (pg) => {
+    const isLiveP = pg.live;
+    const startP = Date.parse(pg.startTime ?? "");
+    if (!isLiveP && !(startP > Date.now() - 600000 && startP - Date.now() < PRE_WINDOW_MS)) return;
+    let best: any = null, bestSc = 0, flip = false;
+    for (const e of bovadaEsports) {
+      if (e.live !== isLiveP) continue;
+      if (!e.mapMl?.[pg.mapNum]) continue;
+      const [c1, c2] = e.teams;
+      const l1 = bestSim(pg.Lv, [c1]), s2 = bestSim(pg.Sv, [c2]), l2 = bestSim(pg.Lv, [c2]), s1 = bestSim(pg.Sv, [c1]);
+      const straight = l1 + s2, flipped = l2 + s1, sc = Math.max(straight, flipped);
+      const lo = (flipped > straight ? Math.min(l2, s1) : Math.min(l1, s2));
+      if (lo < 0.75) continue;
+      if (sc > bestSc) { bestSc = sc; best = e; flip = flipped > straight; }
+    }
+    if (!best) return;
+    const [n0, n1] = flip ? [best.teams[1], best.teams[0]] : best.teams;
+    const mapOdds = best.mapMl![pg.mapNum];
+    const dGtL = mapOdds[n0], dGtS = mapOdds[n1];
+    if (!(dGtL > 1) || !(dGtS > 1)) return;
+    mapMatchedN++;
+    const label = `${pg.Ld} vs ${pg.Sd} · Map ${pg.mapNum}`;
+    try {
+      const bbo = await pm.markets.bbo(pg.slug);
+      const d = bbo?.marketData;
+      if (d?.state !== "MARKET_STATE_OPEN") return;
+      const ask = Number(d?.bestAsk?.value), bid = Number(d?.bestBid?.value);
+      const pmUrl = pmEventUrl(pg.evSlug), gtUrl = best.url ?? null;
+      const hits: string[] = [];
+      const legs: { side: "a" | "b"; p: number; liq: number; dGt: number; pa: string; pb: string }[] = [];
+      if (ask > 0.01 && ask < 0.99) legs.push({ side: "a", p: ask, liq: Number(d?.askShares ?? 0) * ask, dGt: dGtS, pa: pg.Ld, pb: pg.Sd });
+      if (bid > 0.01 && bid < 0.99) legs.push({ side: "b", p: 1 - bid, liq: Number(d?.bidShares ?? 0) * (1 - bid), dGt: dGtL, pa: pg.Sd, pb: pg.Ld });
+      for (const leg of legs) {
+        const dPm = pmDecimal(leg.p);
+        const pct = (1 / (1 / dPm + 1 / leg.dGt) - 1) * 100;
+        noteClose(pct, label);
+        if (pct <= 0 || pct > FEED_MAX_PCT) continue;
+        const dp = await pmDepth(pg.slug, leg.side === "a", dPm, leg.dGt, leg.liq);
+        if (!dp.ok) continue;
+        const key = "ME|" + pg.slug + "|" + leg.side;
+        hits.push(key);
+        const pmLong = leg.side === "a";
+        const rowPm = { book: "polymarket", odds: dPm, liq: dp.depth || null };
+        const rowGt = { book: "bovada", odds: leg.dGt, liq: null };
+        const A = pmLong ? rowPm : rowGt, B = pmLong ? rowGt : rowPm;
+        const uA = pmLong ? pmUrl : gtUrl, uB = pmLong ? gtUrl : pmUrl;
+        const fs = await upsertArb({ key, sport: "Esports", league: `Map ${pg.mapNum}`, market: "Map " + pg.mapNum + " Moneyline", pa: leg.pa, pb: leg.pb, start: startP, live: isLiveP, A, B, pct, uA, uB });
+        console.log(`ARB ${pct.toFixed(2)}% ${label} (${leg.pa} on PM, other side on bovada) depth $${Math.round(dp.depth)}`);
+        if (pct >= ALERT_ANY_PCT && fs && Date.now() - new Date(fs).getTime() < 20000) {
+          const ia = 1 / dPm, ib = 1 / leg.dGt;
+          alertArb({
+            key, pct, sport: "Esports", league: `Map ${pg.mapNum} · ${pg.evTitle}`, live: isLiveP, start: startP,
+            pmName: leg.pa, pmCents: Math.round(leg.p * 100), pmLiq: dp.depth,
+            gtName: leg.pb, gtLabel: "Bovada", gtOdds: leg.dGt,
+            stakePm: (ALERT_BANKROLL * ia) / (ia + ib), stakeGt: (ALERT_BANKROLL * ib) / (ia + ib), pmUrl, gtUrl,
+          });
+        }
+      }
+      for (const side of ["a", "b"]) {
+        const key = "ME|" + pg.slug + "|" + side;
+        if (!hits.includes(key)) await sql`UPDATE arb_opps SET active = false WHERE opp_key = ${key} AND active`;
+      }
+    } catch (e: any) { console.error("esports map-level arb failed", pg.slug, e?.message ?? e); }
   });
   pre.sort((a, b) => (lastChecked.get(jk(a)) ?? 0) - (lastChecked.get(jk(b)) ?? 0));
   const jobs = (fullSweep || !live.length ? [...live, ...pre] : live).slice(0, MAX_JOBS);
@@ -1399,7 +1510,7 @@ async function scan(): Promise<number> {
       }
     } catch (e: any) { console.error("compare failed", j.wm?.slug, e?.message ?? e); }
   });
-  if (diag) console.log(`Matched games by sport: ${JSON.stringify(matchedPer)} (live ${live.length}, pre due ${pre.length}, ${fullSweep ? "full sweep" : "live-only"}) | by name: ${nmMatched} matched, ${nmUnmatched} unmatched | bet105 ${feedEvs.bet105.length} games/${feedN.bet105} matched, bovada ${feedEvs.bovada.length} games/${feedN.bovada} matched, gemini ${feedEvs.gemini.length} games/${feedN.gemini} matched | cross-book games: ${crossN} | blocked: ${blockedN} | fill-check drops: ${lqSkip} | over-cap drops (>${FEED_MAX_PCT}%): ${capSkip} | mem ${Math.round(process.memoryUsage().rss / 1048576)}MB`);
+  if (diag) console.log(`Matched games by sport: ${JSON.stringify(matchedPer)} (live ${live.length}, pre due ${pre.length}, ${fullSweep ? "full sweep" : "live-only"}) | by name: ${nmMatched} matched, ${nmUnmatched} unmatched | bet105 ${feedEvs.bet105.length} games/${feedN.bet105} matched, bovada ${feedEvs.bovada.length} games/${feedN.bovada} matched, gemini ${feedEvs.gemini.length} games/${feedN.gemini} matched | esports maps: ${pmMapGames.length} PM/${mapMatchedN} matched vs bovada | cross-book games: ${crossN} | blocked: ${blockedN} | fill-check drops: ${lqSkip} | over-cap drops (>${FEED_MAX_PCT}%): ${capSkip} | mem ${Math.round(process.memoryUsage().rss / 1048576)}MB`);
   await sql`UPDATE arb_opps SET active = false WHERE active AND last_seen < now() - interval '3 minutes'`;
   closeList.sort((a, b) => b.pct - a.pct);
   const seenLabel = new Set<string>();
