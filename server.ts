@@ -1109,6 +1109,15 @@ async function refreshPolymarket() {
         const eid = String(ev.id);
         if (seen.has(eid)) continue;
         seen.add(eid); fresh++; total++;
+        // confirmed real, live, open event (polymarket.us/sports/cfb/cfb-nill-wyom-2026-10-17): its
+        // moneyline already reaches matching fine, but whether its SPREAD market exists in this same
+        // pm.events.list() response at all is still unconfirmed -- the aggregate SPORTS_MARKET_TYPE_
+        // SPREAD/TOTAL count has sat flat at exactly 10 across many cycles even as this live game came
+        // and went, which looks like a fixed/stale set, not these. Dump every market on this exact
+        // event verbatim to settle it with real data instead of another inference from aggregate counts.
+        if (/nill.*wyom|wyom.*nill/i.test(String(ev.slug ?? "") + String(ev.title ?? ""))) {
+          console.log(`NIU-WYO-EVENT-DIAG slug=${JSON.stringify(ev.slug)} title=${JSON.stringify(ev.title)} markets=${JSON.stringify(ev.markets ?? [])}`);
+        }
         let picked = false;
         const teamMk: any[] = [];
         const nameMk: any[] = [];
