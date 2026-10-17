@@ -979,12 +979,18 @@ function matchFeed(g: any, evs: FeedEv[], startP: number, kind: string): { ev: F
   const isLive = !!g.ev.live;
   const Ln: string[] = g.Ln ?? [g.L?.description], Sn: string[] = g.Sn ?? [g.S?.description];
   let b1: any = null, b2 = 0;
+  // the live/sport/time checks below each silently `continue` -- if EVERY candidate in evs gets
+  // filtered out by one of these before ever reaching the scoring section, b1 stays null and the
+  // existing FEED-NOMATCH log (gated on `if (b1)`) never fires at all: a real match attempt that
+  // produces zero visible trace, indistinguishable from this function never having been called.
+  // Tallying which gate ate each candidate turns that silence into an actual diagnosis.
+  let liveMiss = 0, sportMiss = 0, timeMiss = 0, femMiss = 0;
   for (const e of evs) {
-    if (e.live !== isLive) continue;
-    if (e.sport && kind && e.sport !== kind) continue;
-    if (isLive ? e.start && Math.abs(e.start - startP) > START_TOL_MS : !(e.start && Math.abs(e.start - startP) <= START_TOL_MS)) continue;
+    if (e.live !== isLive) { liveMiss++; continue; }
+    if (e.sport && kind && e.sport !== kind) { sportMiss++; continue; }
+    if (isLive ? e.start && Math.abs(e.start - startP) > START_TOL_MS : !(e.start && Math.abs(e.start - startP) <= START_TOL_MS)) { timeMiss++; continue; }
     const [c1, c2] = e.teams;
-    if (g.fem !== undefined && g.fem !== (isFem(c1) || isFem(c2))) continue;
+    if (g.fem !== undefined && g.fem !== (isFem(c1) || isFem(c2))) { femMiss++; continue; }
     const l1 = bestSim(Ln, [c1]), s2 = bestSim(Sn, [c2]), l2 = bestSim(Ln, [c2]), s1 = bestSim(Sn, [c1]);
     const straight = l1 + s2, flipped = l2 + s1, flip = flipped > straight, sc = Math.max(straight, flipped);
     const lo = flip ? Math.min(l2, s1) : Math.min(l1, s2);
@@ -992,6 +998,13 @@ function matchFeed(g: any, evs: FeedEv[], startP: number, kind: string): { ev: F
     if (!b1 || sc > b1.sc) { b2 = Math.max(b2, b1?.sc ?? 0); b1 = { e, sc, lo, flip, amb }; } else b2 = Math.max(b2, sc);
   }
   if (!b1 || b1.lo < 0.75 || b1.sc - b2 < 0.12 || b1.amb) {
+    if (!b1 && evs.length) {
+      const gKey2 = "ZERO|" + (Ln[0] ?? "") + "|" + (Sn[0] ?? "") + "|" + kind + "|" + isLive;
+      if (!FEED_NOMATCH_LOGGED.has(gKey2)) {
+        FEED_NOMATCH_LOGGED.add(gKey2);
+        console.log(`FEED-NOMATCH-ZERO ${Ln[0]} vs ${Sn[0]} (${kind}, PM live=${isLive}) | pool=${evs.length} | liveMiss=${liveMiss} sportMiss=${sportMiss} timeMiss=${timeMiss} femMiss=${femMiss}`);
+      }
+    }
     if (b1) {
       const gKey = (Ln[0] ?? "") + "|" + (Sn[0] ?? "") + "|" + (b1.e.teams[0] ?? "") + "|" + (b1.e.teams[1] ?? "");
       if (!FEED_NOMATCH_LOGGED.has(gKey)) {
@@ -1050,6 +1063,13 @@ async function refreshPolymarket() {
     // distinct sportsMarketType string seen, with counts) so spread/total/team-total support can be
     // built against real data. Remove once confirmed.
     const allTypesSeen: Record<string, number> = {};
+    // breakthrough from SPREAD-SLUG-DIAG: every market it dumped carried a SEPARATE field,
+    // sportsMarketTypeV2 ("SPORTS_MARKET_TYPE_SPREAD" etc.), distinct from sportsMarketType (the only
+    // field checked anywhere in this file so far). That field is probably the sport-agnostic category
+    // (spread/total/moneyline) while sportsMarketType is the granular sport+market string -- which
+    // would mean ALL-TYPES-DIAG was exhaustive over the wrong field the whole time. Tally both,
+    // together, to see the real shape before changing any matching logic.
+    const allTypesV2Seen: Record<string, number> = {};
     // ALL-TYPES-DIAG (logging every m.sportsMarketType seen) came back with zero spread/total types,
     // but arb_opps proves our OWN evalSpreads pipeline found real spread arbs as recently as Oct 12
     // (opp_keys like "S|asc-nfl-bal-atl-2026-10-11-pos-4pt5|l" -- a market slug with the point-spread
@@ -1058,7 +1078,6 @@ async function refreshPolymarket() {
     // string assumption itself may be wrong for this market, not just its exact value: dump the RAW
     // market object (every field) the first few times a market's slug matches that distinct spread
     // naming pattern, bypassing m.sportsMarketType entirely, to see what actually distinguishes it.
-    let spreadSlugDiagN = 0;
     let pages = 0, total = 0, nameSkipped = 0;
     for (let off = 0; off < 8000; off += 200) {
       const r = await pm.events.list({ active: true, closed: false, limit: 200, offset: off });
@@ -1075,10 +1094,8 @@ async function refreshPolymarket() {
         const tots: any[] = [];
         const sps: any[] = [];
         for (const m of ev.markets ?? []) {
-          if (spreadSlugDiagN < 8 && /-pos-\d|-neg-\d/.test(String(m.slug ?? ""))) {
-            spreadSlugDiagN++;
-            console.log(`SPREAD-SLUG-DIAG #${spreadSlugDiagN} raw market: ${JSON.stringify(m)}`);
-          }
+          const t2 = String(m.sportsMarketTypeV2 ?? "");
+          if (t2) allTypesV2Seen[t2] = (allTypesV2Seen[t2] ?? 0) + 1;
           const t = String(m.sportsMarketType ?? "");
           if (!t) continue;
           allTypesSeen[t] = (allTypesSeen[t] ?? 0) + 1;
@@ -1192,6 +1209,8 @@ async function refreshPolymarket() {
     console.log(`Polymarket spreads kept ${JSON.stringify(spKept)}, skipped no-overtime-text ${spSkip.noOT}, other ${spSkip.other}; ${nameGames.filter((g) => g.sps.length).length} games have spreads`);
     const sortedTypes = Object.entries(allTypesSeen).sort((a, b) => b[1] - a[1]);
     console.log(`ALL-TYPES-DIAG ${sortedTypes.length} distinct sportsMarketType values: ${JSON.stringify(Object.fromEntries(sortedTypes))}`);
+    const sortedTypesV2 = Object.entries(allTypesV2Seen).sort((a, b) => b[1] - a[1]);
+    console.log(`ALL-TYPES-V2-DIAG ${sortedTypesV2.length} distinct sportsMarketTypeV2 values: ${JSON.stringify(Object.fromEntries(sortedTypesV2))}`);
   } finally {
     pmRefreshing = false;
   }
