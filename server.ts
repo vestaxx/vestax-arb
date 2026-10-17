@@ -358,6 +358,45 @@ function alertArb(a: { key: string; pct: number; sport: string; league: string; 
   acts.push(`view, Arbs page, ${PAGE_URL}`);
   void ntfy(`ARB ${a.pct.toFixed(1)}% ${a.sport}${a.live ? " LIVE" : ""}`, body, "high", a.gtUrl || a.pmUrl, acts.join("; "));
 }
+const SUSPICIOUS_PCT = Number(Bun.env.ARB_SUSPICIOUS_PCT ?? 8);
+// Safety-net audit for the two bug classes found and fixed on 2026-10-17 (a stale-liquidity fallback
+// that let a near-empty Polymarket order book through, and a percentage sanity cap that only applied
+// to the cross-book feed path, never the direct Polymarket-vs-Goated path -- see the comments on
+// pmDepth and the FEED_MAX_PCT checks in the main scan loop). Both are fixed going forward, but this
+// stays on as a backstop: any EXECUTED trade (filled_shares > 0) whose recorded profit_pct is still
+// unusually high gets flagged here, once, instead of requiring someone to notice only by manually
+// cross-referencing Goated screenshots against Polymarket activity after the fact, the way we found
+// the Josef Zabransky / Radim Urbaniec case (a 59% "edge" that turned out to be two different
+// real-world matches mistakenly paired as one -- both legs lost, which a real hedge cannot do).
+// IMPORTANT LIMITATION: this can only check the numbers already on our own side (the recorded pct,
+// the Polymarket fill). There is no automated visibility into Goated's own settlement outcome -- so
+// this is a "go double-check this one" prompt, not a definitive verdict that anything was wrong.
+async function auditSuspiciousTrades() {
+  let rows: any[] = [];
+  try {
+    rows = await sql`
+      SELECT t.id, t.opp_key, t.goated_stake, t.goated_payout, t.filled_shares, t.cost_est,
+             o.sport, o.league, o.player_a, o.player_b, o.profit_pct
+      FROM arb_trades t
+      JOIN arb_opps o ON o.opp_key = t.opp_key
+      WHERE t.filled_shares > 0 AND t.pct_reviewed = false AND o.profit_pct > ${SUSPICIOUS_PCT}
+      ORDER BY t.id ASC
+      LIMIT 50`;
+  } catch (e: any) { console.error("suspicious-trade audit query failed:", e?.message ?? e); return; }
+  for (const r of rows) {
+    const matchup = `${r.player_a} vs ${r.player_b}`;
+    const pct = Number(r.profit_pct), cost = Number(r.cost_est ?? 0);
+    console.log(`SUSPICIOUS-PCT trade #${r.id} ${matchup} (${r.sport}, ${r.league}) profit_pct=${pct.toFixed(1)}% goated_stake=$${r.goated_stake} pm_cost=$${cost.toFixed(2)}`);
+    void ntfy(
+      `Double-check this one: ${matchup}`,
+      `This hedge showed a ${pct.toFixed(1)}% edge (${r.league}) -- unusually high, worth confirming the Goated side actually settled as a win. Goated stake $${r.goated_stake}, Polymarket cost ~$${cost.toFixed(2)}. If Goated also lost or was voided, this pairing was likely bad.`,
+      "default",
+    );
+    try { await sql`UPDATE arb_trades SET pct_reviewed = true WHERE id = ${r.id}`; }
+    catch (e: any) { console.error("suspicious-trade audit mark-reviewed failed for", r.id, e?.message ?? e); }
+  }
+}
+(async () => { while (true) { try { await auditSuspiciousTrades(); } catch (e: any) { console.error("suspicious-trade audit failed", e?.message ?? e); } await Bun.sleep(10 * 60000); } })();
 function alertCross(key: string, pct: number, sport: string, matchup: string, live: boolean, start: number,
   legA: { book: string; name: string; odds: number; url?: string | null }, legB: { book: string; name: string; odds: number; url?: string | null }) {
   if (!NTFY_TOPIC || pct < (live ? ALERT_MIN_PCT_LIVE : ALERT_MIN_PCT)) return;
