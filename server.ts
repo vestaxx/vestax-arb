@@ -1070,6 +1070,13 @@ async function refreshPolymarket() {
     // would mean ALL-TYPES-DIAG was exhaustive over the wrong field the whole time. Tally both,
     // together, to see the real shape before changing any matching logic.
     const allTypesV2Seen: Record<string, number> = {};
+    // ALL-TYPES-V2-DIAG confirmed sportsMarketTypeV2 "SPORTS_MARKET_TYPE_SPREAD"/"_TOTAL" exist (10
+    // each right now) and are the real category signal. But every raw sample seen so far (via the
+    // slug-pattern diagnostic) was a stale, RESOLVED esports handicap -- its price field was the
+    // settled value ("0"/"1"), not necessarily the same shape a live, OPEN, non-esports spread/total
+    // market uses for its tradeable price. The existing TOT_TYPE/SPREAD_TYPE body code reads
+    // L?.quote?.value for that price; confirm that's really the live field before wiring v2 in.
+    let liveSpreadDiagN = 0;
     // ALL-TYPES-DIAG (logging every m.sportsMarketType seen) came back with zero spread/total types,
     // but arb_opps proves our OWN evalSpreads pipeline found real spread arbs as recently as Oct 12
     // (opp_keys like "S|asc-nfl-bal-atl-2026-10-11-pos-4pt5|l" -- a market slug with the point-spread
@@ -1099,6 +1106,15 @@ async function refreshPolymarket() {
           const t = String(m.sportsMarketType ?? "");
           if (!t) continue;
           allTypesSeen[t] = (allTypesSeen[t] ?? 0) + 1;
+          if (
+            liveSpreadDiagN < 10 &&
+            !t.startsWith("esports_") &&
+            (t2 === "SPORTS_MARKET_TYPE_SPREAD" || t2 === "SPORTS_MARKET_TYPE_TOTAL") &&
+            m.active !== false && !m.closed && m.status !== "MARKET_STATUS_RESOLVED"
+          ) {
+            liveSpreadDiagN++;
+            console.log(`LIVE-SPREAD-DIAG #${liveSpreadDiagN} v2=${t2} v1=${t} raw market: ${JSON.stringify(m)}`);
+          }
           const sides = m.marketSides ?? [];
           const L = sides.find((s: any) => s.long), S = sides.find((s: any) => !s.long);
           const mapM = ESPORTS_MAP_WINNER_TYPE.exec(t);
