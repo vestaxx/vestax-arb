@@ -1010,6 +1010,14 @@ async function refreshPolymarket() {
     const totSkip = { noOT: 0, other: 0 };
     const spSkip = { noOT: 0, other: 0 };
     const spKept: Record<string, number> = {};
+    // one-time diagnostic: SPREAD_TYPE only matches football/basketball/baseball_team_full_game_spread,
+    // but NAME_TYPE (moneyline) explicitly lists extra league prefixes too (ncaaf, nfl, ncaab, nba, cbb,
+    // mlb, nhl) that football/basketball/baseball alone don't cover -- and "spreads kept {}" (always
+    // empty, skip counters also always 0) means this code path is never even being entered, for any
+    // market, which only happens if SPREAD_TYPE never matches any real type string at all. This logs
+    // every distinct type string containing "spread" regardless of whether SPREAD_TYPE matches it, to
+    // find the real naming instead of guessing which extra prefixes to add. Remove once confirmed.
+    const spreadLikeTypes = new Set<string>();
     let pages = 0, total = 0, nameSkipped = 0;
     for (let off = 0; off < 8000; off += 200) {
       const r = await pm.events.list({ active: true, closed: false, limit: 200, offset: off });
@@ -1028,6 +1036,7 @@ async function refreshPolymarket() {
         for (const m of ev.markets ?? []) {
           const t = String(m.sportsMarketType ?? "");
           if (!t) continue;
+          if (/spread/i.test(t)) spreadLikeTypes.add(t);
           const sides = m.marketSides ?? [];
           const L = sides.find((s: any) => s.long), S = sides.find((s: any) => !s.long);
           const mapM = ESPORTS_MAP_WINNER_TYPE.exec(t);
@@ -1136,6 +1145,7 @@ async function refreshPolymarket() {
     console.log(`Polymarket team-name games: ${nameGames.length} ${JSON.stringify(nameTypes)} (skipped ${nameSkipped} with !=2 teams) | mem ${Math.round(process.memoryUsage().rss / 1048576)}MB`);
     console.log(`Polymarket totals kept ${JSON.stringify(totKept)}, skipped no-overtime-text ${totSkip.noOT}, other ${totSkip.other}; ${nameGames.filter((g) => g.tots.length).length} games have totals`);
     console.log(`Polymarket spreads kept ${JSON.stringify(spKept)}, skipped no-overtime-text ${spSkip.noOT}, other ${spSkip.other}; ${nameGames.filter((g) => g.sps.length).length} games have spreads`);
+    console.log(`SPREAD-TYPE-DIAG distinct types containing "spread": ${JSON.stringify([...spreadLikeTypes])}`);
   } finally {
     pmRefreshing = false;
   }
