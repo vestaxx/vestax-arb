@@ -445,7 +445,6 @@ let gtSports: { slug: string; name: string; winnerId: string }[] = [];
 let gtEvents = new Map<string, any>();
 let gtTeamList: any[] = [];
 let gtCatAt = 0;
-let gtTtDiagN = 0;
 // full pool of competitor ids seen across every Goated table tennis event (not just paired ones --
 // pairKey requires an exact pair match, which is stricter than "does this id exist anywhere in
 // Goated's table tennis competitor pool at all"). Used by the overlap diagnostic below to answer,
@@ -474,14 +473,6 @@ async function refreshGoated() {
   await pool(tourns, 4, async (t) => {
     try {
       for (const e of (await gt(`/listing/tournament/${t.slug}/all-events?lang=en`)) ?? []) {
-        // one-time raw dump of Goated's table tennis competitor id scheme, to compare directly
-        // against Polymarket's (which carries no Sportradar id at all for table tennis -- see
-        // TT-ID-DIAG) -- need to know what format Goated's own external_id takes here before
-        // picking a fix. Remove once confirmed.
-        if (t.sport.name === "Table Tennis" && gtTtDiagN < 15) {
-          gtTtDiagN++;
-          console.log(`GT-TT-ID-DIAG #${gtTtDiagN} league=${JSON.stringify(t.name)} competitors=${JSON.stringify((e.competitors ?? []).map((c: any) => ({ name: c.name, external_id: c.external_id })))}`);
-        }
         const comps = (e.competitors ?? []).map((c: any) => ({ id: String(c.external_id ?? "").replace(/^sr:competitor:/, ""), q: c.qualifier, name: c.name }));
         if (t.sport.name === "Table Tennis") for (const c of comps) if (c.id) ttIds.add(c.id);
         if (comps.length !== 2 || comps.some((c: any) => !c.id)) continue;
@@ -928,7 +919,6 @@ let pmNameGames: any[] = [];
 // than one qualifying winner-type market per event, but wrong here).
 let pmMapGames: { slug: string; mapNum: number; Ld: string; Sd: string; Lv: string[]; Sv: string[]; evTitle: string; evSlug: string; startTime: string | null; live: boolean; fem: boolean }[] = [];
 const MAP_NOMATCH_LOGGED = new Set<string>();
-let bvdTtDiagN = 0;
 let pmCatAt = 0;
 let pmRefreshing = false;
 const slimEv = (ev: any) => ({ id: String(ev.id), startTime: ev.startTime ?? null, live: !!ev.live, title: String(ev.title ?? ""), slug: String(ev.slug ?? "") });
@@ -1003,25 +993,16 @@ async function refreshPolymarket() {
           }
           const isTennis = t.startsWith("tennis_");
           const isEsports = t.startsWith("esports_");
-          const isTableTennis = t.startsWith("table_tennis_");
           if (isTennis && !TENNIS_ON) continue;
           if (isEsports && !ESPORTS_ON) continue;
           if (BAD_TYPE.test(t)) continue;
-          // table tennis gets the same Sportradar-ID fallback as tennis/esports -- theory, not yet
-          // confirmed against real data the way the tennis/esports fallback was. A first attempt at
-          // this fix (adding isTableTennis to the OR-fallback) turned out to be a no-op in practice:
-          // pid(s) was already non-empty for table tennis sides pre-fix (that's why kept[t] already
-          // counted 48 of them), and `pid(s) || srId(s)` short-circuits on that truthy value before
-          // srId() ever runs. So either pid()'s value is simply the wrong namespace for table tennis
-          // (doesn't align with Goated's Sportradar-keyed events) and srId should take priority, or
-          // the mismatch is somewhere else entirely (e.g. Goated's table tennis events failing the
-          // comps.length===2 check in refreshGoated). Diagnostic below checks the first case directly
-          // before changing anything further -- remove once the real cause is confirmed.
-          if (isTableTennis && bvdTtDiagN < 20 && L) {
-            bvdTtDiagN++;
-            console.log(`TT-ID-DIAG #${bvdTtDiagN} L.desc=${JSON.stringify(L.description)} pid(L)=${JSON.stringify(pid(L))} srId(L)=${JSON.stringify(srId(L))} providerIds=${JSON.stringify(L?.team?.providerIds ?? [])}`);
-          }
-          const idOf = (s: any) => pid(s) || (isTennis || isEsports || isTableTennis ? srId(s) : "");
+          // table tennis doesn't need (and never benefited from) a Sportradar-ID fallback the way
+          // tennis/esports do. PM's table tennis sides carry no Sportradar id at all (pid()'s
+          // "PROVIDER_ODDSPAPI" value is the only usable id here), but that id turns out to be the
+          // literal same number as Goated's Sportradar competitor id (minus the "sr:competitor:"
+          // prefix) -- confirmed by direct set overlap (see TT-ID-OVERLAP below). pid() alone was
+          // always sufficient; the real issue was the league-block, fixed separately in isBlocked.
+          const idOf = (s: any) => pid(s) || (isTennis || isEsports ? srId(s) : "");
           if (!L || !idOf(L)) continue;
           if (sides.length === 2 && S && idOf(S) && idOf(L) !== idOf(S)) {
             kept[t] = (kept[t] ?? 0) + 1;
