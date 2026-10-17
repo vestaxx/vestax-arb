@@ -638,7 +638,6 @@ const BVD_SPORTS: { sport: string; fb: [string, string][] }[] = [
 const BVD_CODE: Record<string, string> = { FOOT: "football", BASK: "basketball", BASE: "baseball", HCKY: "hockey", TENN: "tennis", ESPT: "esports", ESPO: "esports", ESPORTS: "esports", ESPORT: "esports", SOCC: "soccer", SOCCER: "soccer" };
 const bvdCoupon = (p: string) => `/services/sports/event/coupon/events/A/description/${p}?marketFilterId=def&lang=en`;
 const bvdState: Record<string, string> = {};
-let bvdEspDiagN = 0;
 const bvdNum = (x: any) => { const n = parseFloat(String(x ?? "").replace(/[^0-9.+-]/g, "")); return Number.isFinite(n) ? n : NaN; };
 const bvdOpen = (x: any) => !x?.status || String(x.status).toUpperCase() === "O";
 function bvdCollect(ev: any, live: boolean, teams: string[], alt: boolean, out: FeedEv) {
@@ -647,20 +646,11 @@ function bvdCollect(ev: any, live: boolean, teams: string[], alt: boolean, out: 
     for (const m of g.markets ?? []) {
       if (!bvdOpen(m)) continue;
       const per = m.period ?? {}, pd = String(per.description ?? "");
-      // one-time raw dump of Bovada's actual esports period/market shape -- the map-period guess
-      // above (pd matching /^map\s*(\d+)/i) has no confirmed real sample behind it; this answers
-      // that directly instead of continuing to guess. Remove once confirmed either way.
-      if (out.sport === "esports" && bvdEspDiagN < 200) {
-        bvdEspDiagN++;
-        // only log periods that AREN'T the plain full-match "Game" one, since those are already
-        // confirmed and just noise now -- this is specifically hunting for whatever a per-map
-        // period actually looks like, if Bovada exposes one at all on this endpoint
-        if (per.description !== "Game") console.log(`BVD-ESPORTS-RAW #${bvdEspDiagN} period=${JSON.stringify(per)} desc=${JSON.stringify(m.description)} key=${JSON.stringify(m.key)}`);
-      }
-      // esports best-of-N series: each individual map is modeled as its own period, the same
-      // mechanism Bovada uses for halves/quarters elsewhere -- "Map 2" rather than "2nd Quarter".
-      // Not confirmed against a real captured response the way the other period checks here were;
-      // check BOVADA feed logs for actual map-moneyline counts once this is live.
+      // esports best-of-N series: each map is its own period (e.g. period.description "Map 2"),
+      // the same mechanism Bovada uses for halves/quarters elsewhere. Confirmed via captured WS
+      // traffic -- but note the batch coupon endpoint this function is fed from (marketFilterId=def)
+      // never actually returns these periods; map moneylines are populated separately by
+      // bvdFetchMapMl/pullBovadaMapMl below, which hits the per-event endpoint with no filter.
       const mapM = /^map\s*(\d+)/i.exec(pd);
       if (!(per.main === true || /^(game|match|full)/i.test(pd) || mapM)) continue;
       if (typeof per.live === "boolean" && per.live !== live) continue;
@@ -750,6 +740,56 @@ if (Bun.env.BOVADA_OFF !== "1") (async () => { while (true) { try { await pullBo
 async function bvdEnrich(fe: FeedEv): Promise<FeedEv> {
   return fe;
 }
+// Per-event map-level moneylines for Bovada esports. Confirmed via captured WS (STOMP) traffic:
+// Bovada's own event page subscribes to /eventByLink/... and gets back a "fullEvent" payload with
+// displayGroups[].markets[] where each map has its own period (id 12148/12149/12150, description
+// "Map 1"/"Map 2"/"Map 3"). The batch coupon endpoint used by bvdLoad (marketFilterId=def) strips
+// these out -- confirmed by direct comparison -- but the per-event REST endpoint below, hit with no
+// marketFilterId at all, returns the full market tree including the map periods. No WS client needed.
+const bvdEventCoupon = (link: string) => `/services/sports/event/coupon/events/A/description${link}?preMatchOnly=true&lang=en`;
+async function bvdFetchMapMl(link: string): Promise<Record<number, Record<string, number>> | null> {
+  try {
+    const r = await fetch(BVD_HOST + bvdEventCoupon(link), { headers: BVD_HEAD, signal: AbortSignal.timeout(12000) });
+    if (!r.ok) return null;
+    const j: any = await r.json();
+    const out: Record<number, Record<string, number>> = {};
+    for (const g of Array.isArray(j) ? j : [j]) {
+      for (const ev of g?.events ?? []) {
+        for (const dg of ev?.displayGroups ?? []) {
+          for (const m of dg?.markets ?? []) {
+            if (!bvdOpen(m)) continue;
+            const pd = String(m.period?.description ?? "");
+            const mapM = /^map\s*(\d+)/i.exec(pd);
+            if (!mapM) continue;
+            const desc = String(m.description ?? "").toLowerCase(), kd = String(m.key ?? "") + " " + desc;
+            if (!(/2W-12|moneyline/i.test(kd)) || /total|spread|handicap|alt/.test(desc)) continue;
+            const mapNum = Number(mapM[1]);
+            const bucket = out[mapNum] ?? (out[mapNum] = {});
+            for (const o of (m.outcomes ?? []).filter(bvdOpen)) {
+              const dc = bvdNum(o?.price?.decimal);
+              // outcome names here are suffixed e.g. "Eternal Fire - Map 2" -- strip that back to
+              // the plain team name so it matches the team strings already used in e.teams/e.ml.
+              const nm = String(o.description ?? "").replace(/\s*-\s*map\s*\d+\s*$/i, "").trim();
+              if (dc > 1 && nm) bucket[nm] = dc;
+            }
+          }
+        }
+      }
+    }
+    return Object.keys(out).length ? out : null;
+  } catch (e: any) { return null; }
+}
+async function pullBovadaMapMl() {
+  let n = 0, errN = 0;
+  for (const [, rec] of feeds.bovada) {
+    if (rec.ev.sport !== "esports" || !rec.ev.link) continue;
+    const mapMl = await bvdFetchMapMl(rec.ev.link);
+    if (mapMl) { rec.ev.mapMl = mapMl; n++; } else errN++;
+    await Bun.sleep(300);
+  }
+  if (n || errN) console.log(`BOVADA map-ml: updated ${n} esports event(s)${errN ? `, ${errN} failed/empty` : ""}`);
+}
+if (Bun.env.BOVADA_OFF !== "1" && ESPORTS_ON) (async () => { while (true) { try { await pullBovadaMapMl(); } catch (e: any) { console.error("bovada map-ml pull failed", e?.message ?? e); } await Bun.sleep(25000); } })();
 
 let gemLast = "";
 const gemNote = (s: string) => { if (s !== gemLast) { gemLast = s; console.log("GEMINI feed: " + s); } };
