@@ -1178,8 +1178,17 @@ const jk = (j: any) => j.wm.slug + (j.sfx ?? "");
 const glabel = (j: any) => FEED_LABEL[j.book ?? "goated"] ?? "Goated";
 const sfxOf = (k: string) => (/~[a-z0-9]+$/.exec(k) ?? [""])[0];
 const SPORT_NAME: Record<string, string> = { football: "American Football", basketball: "Basketball", baseball: "Baseball", tennis: "Tennis", hockey: "Hockey", esports: "Esports", soccer: "Soccer" };
+// NOTE: the esports branch below tests the STRINGIFIED regex stored in g.sport (an odd design --
+// g.sport is itself a regex object here, not a plain sport name), not a Goated sport name. That
+// field was changed from /esports/i to /esport/i (singular) elsewhere to fix Goated-name matching
+// (see the comment where g.sport is assigned), which silently broke this unrelated check: it used
+// to test /esports/ against the stringified regex and match ("/esports/i" contains "esports"), but
+// "/esport/i" (singular) does not contain "esports" (plural), so this always returned "" for esports
+// after that fix -- which zeroes out addFeedJobs (its first line is `if (!kind) return out`) for
+// every esports market, silently disabling Bovada/Bet105/Gemini matching for esports entirely. Fixed
+// by matching the same singular convention here too.
 const kindOf = (g: any) =>
-  g.sport ? (/football/.test(String(g.sport)) ? "football" : /basketball/.test(String(g.sport)) ? "basketball" : /baseball/.test(String(g.sport)) ? "baseball" : /esports/.test(String(g.sport)) ? "esports" : /soccer/.test(String(g.sport)) ? "soccer" : "")
+  g.sport ? (/football/.test(String(g.sport)) ? "football" : /basketball/.test(String(g.sport)) ? "basketball" : /baseball/.test(String(g.sport)) ? "baseball" : /esport/.test(String(g.sport)) ? "esports" : /soccer/.test(String(g.sport)) ? "soccer" : "")
     : /tennis/i.test(g.t ?? "") ? "tennis" : /hockey|nhl/i.test(g.t ?? "") ? "hockey" : /esports/i.test(g.t ?? "") ? "esports" : /soccer/i.test(g.t ?? "") ? "soccer" : "";
 async function upsertArb(r: { key: string; sport: string; league: string; market: string; pa: string; pb: string; start: number; live: boolean; A: any; B: any; pct: number; uA: string | null; uB: string | null }) {
   const up: any = await sql`
