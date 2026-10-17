@@ -137,7 +137,13 @@ async function trade(body: any) {
   const C = cashMode ? Math.round(cashIn) : 0;
   if (!(gStake > 0) || !(gPay > gStake * 1.01) || gPay > 5000 || gPay / gStake > 200) throw new Error("Enter your sportsbook stake and payout (from your bet slip).");
   if (cashMode && (C > 5000 || gPay < gStake + C + 0.01)) throw new Error(`With these numbers you can spend at most $${Math.max(0, Math.floor(gPay - gStake - 0.01))} on Polymarket and still win either way.`);
+  // timing instrumentation for this call's network round-trips (DB + Polymarket), logged alongside
+  // the existing TRADE line below -- added to get real numbers on where execution latency actually
+  // goes (this server runs in Railway's sfo region; whether a region move would help is a question
+  // for this data, not a guess) before considering any infra change.
+  const tLookup0 = performance.now();
   const [row]: any = await sql`SELECT opp_key FROM arb_opps WHERE id = ${id}`;
+  const lookupMs = Math.round(performance.now() - tLookup0);
   if (!row) throw new Error("Couldn't find that arb.");
   const key = String(row.opp_key);
   const m = /^[TS]\|(.+)\|([ouls])(?:~\w+)?$/.exec(key) ?? /^(.+)\|([ab])(?:~\w+)?$/.exec(key);
@@ -152,12 +158,21 @@ async function trade(body: any) {
   // filled. "additional" means the person is telling us this is a genuinely SEPARATE second stake on the
   // sportsbook (e.g. it double-submitted there) -- so skip that lookback and hedge this one fresh.
   const additional = body?.additional === true;
-  const [prev]: any = additional
-    ? [{ shares: 0, cost: 0 }]
-    : await sql`SELECT COALESCE(SUM(filled_shares), 0)::float AS shares, COALESCE(SUM(cost_est), 0)::float AS cost
-                FROM arb_trades WHERE opp_key = ${key} AND created_at > now() - interval '10 minutes' AND filled_shares > 0`;
+  // the previous-fills lookback (DB) and the live Polymarket quote are independent of each other --
+  // neither needs the other's result, only `key`/`slug`/`long` which are already known at this point --
+  // so run them concurrently instead of back-to-back. Saves one full round-trip's worth of latency on
+  // every trade() call (previously: DB query, then wait for it to finish, then start the PM quote).
+  const tQuote0 = performance.now();
+  const [prevRows, p0]: [any[], number | null] = await Promise.all([
+    additional
+      ? Promise.resolve([{ shares: 0, cost: 0 }])
+      : sql`SELECT COALESCE(SUM(filled_shares), 0)::float AS shares, COALESCE(SUM(cost_est), 0)::float AS cost
+                FROM arb_trades WHERE opp_key = ${key} AND created_at > now() - interval '10 minutes' AND filled_shares > 0`,
+    tradeQuote(slug, long),
+  ]);
+  const quoteMs = Math.round(performance.now() - tQuote0);
+  const prev: any = prevRows[0];
   const have = Number(prev?.shares ?? 0), prevCost = Number(prev?.cost ?? 0);
-  const p0 = await tradeQuote(slug, long);
   if (p0 == null) throw new Error("Polymarket has no open price for this market right now.");
   const leftCash0 = cashMode ? Math.max(0, C - prevCost) : 0;
   const remaining = cashMode ? leftCash0 / costPerShare(p0) : Math.max(0, gPay - have);
@@ -181,9 +196,16 @@ async function trade(body: any) {
   let left = remaining, leftC = leftCash0;
   const more = () => (cashMode ? leftC > 0.5 : left > 0.005 * gPay);
   const ids: string[] = [];
+  const fillQuoteMs: number[] = [], fillBuyMs: number[] = [];
   try {
     for (let i = 0; i < 3 && more(); i++) {
-      const px = i === 0 ? p0 : await tradeQuote(slug, long);
+      let px: number | null;
+      if (i === 0) px = p0;
+      else {
+        const t0 = performance.now();
+        px = await tradeQuote(slug, long);
+        fillQuoteMs.push(Math.round(performance.now() - t0));
+      }
       if (px == null) { stop = "the market closed or has no price"; break; }
       if (px > ceiling) { stop = `the price rose to ${(px * 100).toFixed(1)}¢ (limit ${(ceiling * 100).toFixed(1)}¢)`; break; }
       const cash = cashMode ? leftC : left * costPerShare(px);
@@ -196,7 +218,9 @@ async function trade(body: any) {
       // markets: the price moves more than 0.6% between quote and fill, the IOC order cancels with
       // zero shares, and the hedge never lands even though the user explicitly asked to pay more for it.
       const bips = Math.max(1, mode === "force" ? roomToCeiling : Math.min(MAX_SLIPPAGE_BIPS, roomToCeiling));
+      const tBuy0 = performance.now();
       const f = await placeBuy(slug, long, cash, px, bips);
+      fillBuyMs.push(Math.round(performance.now() - tBuy0));
       if (f.orderId) ids.push(String(f.orderId));
       if (f.shares > 0 && f.longPx != null) {
         const paid = long ? f.longPx : 1 - f.longPx;
@@ -214,11 +238,14 @@ async function trade(body: any) {
     tradeBusy.delete(id);
   }
   const avg = filled > 0 ? notional / filled : null;
+  const tInsert0 = performance.now();
   try {
     await sql`INSERT INTO arb_trades (opp_id, opp_key, mode, goated_stake, goated_payout, wanted_shares, filled_shares, avg_paid, cost_est, ceiling, order_ids, note)
               VALUES (${id}, ${key}, ${mode}, ${gStake}, ${gPay}, ${remaining}, ${filled}, ${avg}, ${spent}, ${ceiling}, ${ids.join(",") || null}, ${stop || (additional ? "additional stake" : null)})`;
   } catch (e: any) { console.error("trade log failed:", e?.message ?? e); }
+  const insertMs = Math.round(performance.now() - tInsert0);
   console.log(`TRADE ${mode}${cashMode ? " cash $" + C : ""} ${slug} ${long ? "long" : "short"}: filled ${filled.toFixed(2)} shares for ~$${spent.toFixed(2)}, avg ${avg == null ? "-" : avg.toFixed(4)}, ceiling ${ceiling}${stop ? ", stopped: " + stop : ""}`);
+  console.log(`TRADE-TIMING lookup=${lookupMs}ms prevQuery+quote(parallel)=${quoteMs}ms fillQuotes=[${fillQuoteMs.join(",")}]ms fillBuys=[${fillBuyMs.join(",")}]ms insert=${insertMs}ms`);
   const done = cashMode ? leftC <= 0.5 : Math.max(0, remaining - filled) < 0.01 * gPay;
   const remainingNow = cashMode ? (done ? 0 : Math.max(0, leftC) / costPerShare(p0)) : Math.max(0, remaining - filled);
   // this leg of the hedge didn't fully go through -- notify immediately so it doesn't sit unhedged unnoticed
