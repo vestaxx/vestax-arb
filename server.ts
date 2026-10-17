@@ -529,11 +529,11 @@ async function gtMarkets(ev: any): Promise<{ winner: Record<string, number> | nu
 }
 
 type FeedEv = { teams: [string, string]; spreads: { team: string; line: number; odds: number }[]; totals: { line: number; over?: number; under?: number }[]; ml: Record<string, number>; live: boolean; start?: number; url?: string; link?: string; league?: string; sport?: string };
-const feeds: Record<string, Map<string, { at: number; ev: FeedEv }>> = { bet105: new Map(), bovada: new Map(), gemini: new Map(), betonline: new Map() };
-const FEED_BOOKS = ["bet105", "bovada", "gemini", "betonline"];
-const FEED_TTL: Record<string, number> = { bet105: 100000, bovada: 30000, gemini: 45000, betonline: 60000 };
-const FEED_LABEL: Record<string, string> = { bet105: "Bet105", bovada: "Bovada", gemini: "Gemini", goated: "Goated", betonline: "BetOnline" };
-const FEED_SFX: Record<string, string> = { bet105: "~b105", bovada: "~bvd", gemini: "~gem", betonline: "~bol" };
+const feeds: Record<string, Map<string, { at: number; ev: FeedEv }>> = { bet105: new Map(), bovada: new Map(), gemini: new Map() };
+const FEED_BOOKS = ["bet105", "bovada", "gemini"];
+const FEED_TTL: Record<string, number> = { bet105: 100000, bovada: 30000, gemini: 45000 };
+const FEED_LABEL: Record<string, string> = { bet105: "Bet105", bovada: "Bovada", gemini: "Gemini", goated: "Goated" };
+const FEED_SFX: Record<string, string> = { bet105: "~b105", bovada: "~bvd", gemini: "~gem" };
 const B105_TOKEN = Bun.env.B105_TOKEN ?? "";
 // temporary: Dexsport is a client-rendered Web3 dapp with no documented odds API and Cloudflare
 // protection, so there's nothing to see from a server-side fetch. This records what a Tampermonkey
@@ -792,90 +792,6 @@ async function pullGemini() {
   gemNote(`ok ${evs.size} pre-match games from ${data.length} events`);
 }
 if (!GEM_OFF) (async () => { while (true) { try { await pullGemini(); } catch (e: any) { gemNote("error " + String(e?.message ?? e).slice(0, 80)); } await Bun.sleep(15000); } })();
-
-// BetOnline.ag feed: api-offering.betonline.ag is a plain unauthenticated REST backend (confirmed:
-// offering-by-league returns full data with no Authorization header at all -- the Bearer token the
-// site's own frontend sends is not enforced server-side for this read-only endpoint).
-const BOL_OFF = Bun.env.BETONLINE_OFF === "1";
-const BOL_BASE = "https://api-offering.betonline.ag/api/offering";
-const BOL_HEAD = { "Accept": "application/json", "Content-Type": "application/json", "gsetting": "bolsassite", "utc-offset": "0" };
-async function bol(path: string, body: any) {
-  const r = await fetch(`${BOL_BASE}/${path}`, { method: "POST", headers: BOL_HEAD, body: JSON.stringify(body) });
-  if (!r.ok) throw new Error(`betonline ${r.status} ${path}`);
-  return await r.json();
-}
-let bolLeagues: { sport: string; league: string }[] = [];
-let bolMenuAt = 0;
-function walkBolMenu(items: any[], out: { sport: string; league: string }[]) {
-  for (const it of items ?? []) {
-    if (it?.HasGames && typeof it?.URL === "string") {
-      const m = /^sportsbook\/([^/]+)\/([^/]+)/.exec(it.URL);
-      if (m) out.push({ sport: m[1], league: m[2] });
-    }
-    if (Array.isArray(it?.SubMenuItems) && it.SubMenuItems.length) walkBolMenu(it.SubMenuItems, out);
-  }
-}
-async function refreshBolMenu() {
-  if (Date.now() - bolMenuAt < 300000 && bolLeagues.length) return;
-  const j = await bol("Sports/get-menu", 0);
-  const out: { sport: string; league: string }[] = [];
-  walkBolMenu(j?.MenuItems ?? [], out);
-  const seen = new Set<string>();
-  bolLeagues = out.filter((x) => {
-    const k = x.sport + "|" + x.league;
-    if (seen.has(k)) return false;
-    seen.add(k);
-    return true;
-  });
-  bolMenuAt = Date.now();
-  console.log(`BetOnline menu: ${bolLeagues.length} leagues with games`);
-}
-const BOL_SPORT_OK = /^(football|basketball|baseball|hockey|tennis|soccer)$/;
-function bolDecLine(x: any): number | undefined {
-  const n = Number(x?.DecimalLine);
-  return n > 1 ? n : undefined;
-}
-async function pullBetOnlineLeague(sport: string, league: string): Promise<number> {
-  const j = await bol("Sports/offering-by-league", { Sport: sport, League: league, ScheduleText: null, filterTime: 0, sport, league });
-  const games: any[] = j?.GameOffering?.GamesDescription ?? [];
-  let n = 0;
-  for (const gd of games) {
-    const g = gd?.Game;
-    if (!g) continue;
-    const away = String(g.AwayTeam ?? "").trim(), home = String(g.HomeTeam ?? "").trim();
-    if (!away || !home || away === home) continue;
-    const ev: FeedEv = { teams: [away, home], spreads: [], totals: [], ml: {}, live: false, sport, league: league.toUpperCase() };
-    const start = Date.parse(String(g.WagerCutOff ?? "") + "Z");
-    if (Number.isFinite(start)) ev.start = start;
-    const awayML = bolDecLine(g.AwayLine?.MoneyLine), homeML = bolDecLine(g.HomeLine?.MoneyLine);
-    if (awayML) ev.ml[away] = awayML;
-    if (homeML) ev.ml[home] = homeML;
-    const awaySp = g.AwayLine?.SpreadLine, homeSp = g.HomeLine?.SpreadLine;
-    const awaySpO = bolDecLine(awaySp), homeSpO = bolDecLine(homeSp);
-    if (awaySpO && Number.isFinite(Number(awaySp?.Point))) ev.spreads.push({ team: away, line: Number(awaySp.Point), odds: awaySpO });
-    if (homeSpO && Number.isFinite(Number(homeSp?.Point))) ev.spreads.push({ team: home, line: Number(homeSp.Point), odds: homeSpO });
-    const tot = g.TotalLine?.TotalLine;
-    const over = bolDecLine(tot?.Over), under = bolDecLine(tot?.Under);
-    if ((over || under) && Number(tot?.Point) > 0) ev.totals.push({ line: Number(tot.Point), over, under });
-    // soccer totals-only -- see the matching note in bvdParse for why this strip happens regardless
-    // of what the feed itself reports.
-    if (sport === "soccer") { ev.ml = {}; ev.spreads = []; }
-    feeds.betonline.set(String(g.GameId ?? `${away}|${home}`), { at: Date.now(), ev });
-    n++;
-  }
-  return n;
-}
-async function pullBetOnline() {
-  await refreshBolMenu();
-  const wanted = bolLeagues.filter((x) => BOL_SPORT_OK.test(x.sport));
-  let total = 0, failed = 0;
-  await pool(wanted, 4, async (lg) => {
-    try { total += await pullBetOnlineLeague(lg.sport, lg.league); }
-    catch (e: any) { failed++; console.error("betonline league failed", lg.sport, lg.league, e?.message ?? e); }
-  });
-  console.log(`BetOnline feed: ${total} games across ${wanted.length - failed}/${wanted.length} leagues`);
-}
-if (!BOL_OFF) (async () => { while (true) { try { await pullBetOnline(); } catch (e: any) { console.error("betonline pull failed", e?.message ?? e); } await Bun.sleep(25000); } })();
 
 function matchFeed(g: any, evs: FeedEv[], startP: number, kind: string): { ev: FeedEv; n0: string; n1: string } | null {
   const isLive = !!g.ev.live;
@@ -1143,8 +1059,8 @@ async function scan(): Promise<number> {
   const fullSweep = myCycle % 3 === 0;
   const live: any[] = [], pre: any[] = [];
   const matchedPer: Record<string, number> = {};
-  const feedEvs: Record<string, FeedEv[]> = { bet105: feedLive("bet105"), bovada: feedLive("bovada"), gemini: feedLive("gemini"), betonline: feedLive("betonline") };
-  const feedN: Record<string, number> = { bet105: 0, bovada: 0, gemini: 0, betonline: 0 };
+  const feedEvs: Record<string, FeedEv[]> = { bet105: feedLive("bet105"), bovada: feedLive("bovada"), gemini: feedLive("gemini") };
+  const feedN: Record<string, number> = { bet105: 0, bovada: 0, gemini: 0 };
   let blockedN = 0, crossN = 0;
   const gmCache = new Map<string, Promise<{ winner: Record<string, number> | null; totals: GtTot; hand: GtHand }>>();
   const gmCached = (ge: any) => { let p = gmCache.get(ge.slug); if (!p) { p = gtMarkets(ge); gmCache.set(ge.slug, p); } return p; };
@@ -1173,7 +1089,7 @@ async function scan(): Promise<number> {
       out[bk] = { n0: mb.n0, n1: mb.n1, ml: mb.ev.ml, url: fev.url, league: fev.league, totals, handA, handB };
       queue({
         ev: g.ev, wm: g.wm, L: { description: g.Lf || g.Ld || g.L?.description }, S: { description: g.Sf || g.Sd || g.S?.description }, lid: "0", sid: "1",
-        ge: { slug: bk, status: isLiveP ? "live" : "", scheduled: g.ev.startTime, league: fev.league ?? FEED_LABEL[bk], sport: { name: SPORT_NAME[kind] }, comps: [{ id: "0", q: "home", name: mb.n0 }, { id: "1", q: "away", name: mb.n1 }], url: fev.url ?? (bk === "bet105" ? B105_URL : bk === "betonline" ? "https://www.betonline.ag/sportsbook" : BVD_HOST + "/sports") },
+        ge: { slug: bk, status: isLiveP ? "live" : "", scheduled: g.ev.startTime, league: fev.league ?? FEED_LABEL[bk], sport: { name: SPORT_NAME[kind] }, comps: [{ id: "0", q: "home", name: mb.n0 }, { id: "1", q: "away", name: mb.n1 }], url: fev.url ?? (bk === "bet105" ? B105_URL : BVD_HOST + "/sports") },
         live: isLiveP, start: startP, byName: true, ptype: g.t, tots: g.tots, sps: g.sps, book: bk, sfx: FEED_SFX[bk], feed: fev,
       }, isLiveP);
     }
@@ -1483,7 +1399,7 @@ async function scan(): Promise<number> {
       }
     } catch (e: any) { console.error("compare failed", j.wm?.slug, e?.message ?? e); }
   });
-  if (diag) console.log(`Matched games by sport: ${JSON.stringify(matchedPer)} (live ${live.length}, pre due ${pre.length}, ${fullSweep ? "full sweep" : "live-only"}) | by name: ${nmMatched} matched, ${nmUnmatched} unmatched | bet105 ${feedEvs.bet105.length} games/${feedN.bet105} matched, bovada ${feedEvs.bovada.length} games/${feedN.bovada} matched, gemini ${feedEvs.gemini.length} games/${feedN.gemini} matched, betonline ${feedEvs.betonline.length} games/${feedN.betonline} matched | cross-book games: ${crossN} | blocked: ${blockedN} | fill-check drops: ${lqSkip} | over-cap drops (>${FEED_MAX_PCT}%): ${capSkip} | mem ${Math.round(process.memoryUsage().rss / 1048576)}MB`);
+  if (diag) console.log(`Matched games by sport: ${JSON.stringify(matchedPer)} (live ${live.length}, pre due ${pre.length}, ${fullSweep ? "full sweep" : "live-only"}) | by name: ${nmMatched} matched, ${nmUnmatched} unmatched | bet105 ${feedEvs.bet105.length} games/${feedN.bet105} matched, bovada ${feedEvs.bovada.length} games/${feedN.bovada} matched, gemini ${feedEvs.gemini.length} games/${feedN.gemini} matched | cross-book games: ${crossN} | blocked: ${blockedN} | fill-check drops: ${lqSkip} | over-cap drops (>${FEED_MAX_PCT}%): ${capSkip} | mem ${Math.round(process.memoryUsage().rss / 1048576)}MB`);
   await sql`UPDATE arb_opps SET active = false WHERE active AND last_seen < now() - interval '3 minutes'`;
   closeList.sort((a, b) => b.pct - a.pct);
   const seenLabel = new Set<string>();
@@ -1532,7 +1448,7 @@ async function arbs() {
     FROM arb_opps WHERE active AND last_seen > now() - interval '3 minutes'
     ORDER BY profit_pct DESC LIMIT 100`;
   const [s] = await sql`SELECT last_scan, compared, best_pct, best_label, closest_json FROM arb_status WHERE id = 1`;
-  return { rows, status: s ?? null, now: new Date().toISOString(), feeds: { bet105: feedLive("bet105").length, bovada: feedLive("bovada").length, gemini: feedLive("gemini").length, betonline: feedLive("betonline").length }, trade: { enabled: TRADE_ON && !!trader, maxUsd: TRADE_MAX_USD, forcePct: Math.round((FORCE_MULT - 1) * 100) } };
+  return { rows, status: s ?? null, now: new Date().toISOString(), feeds: { bet105: feedLive("bet105").length, bovada: feedLive("bovada").length, gemini: feedLive("gemini").length }, trade: { enabled: TRADE_ON && !!trader, maxUsd: TRADE_MAX_USD, forcePct: Math.round((FORCE_MULT - 1) * 100) } };
 }
 const authed = (req: Request) => {
   if (!KEY) return false;
