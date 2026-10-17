@@ -638,6 +638,7 @@ const BVD_SPORTS: { sport: string; fb: [string, string][] }[] = [
 const BVD_CODE: Record<string, string> = { FOOT: "football", BASK: "basketball", BASE: "baseball", HCKY: "hockey", TENN: "tennis", ESPT: "esports", ESPO: "esports", ESPORTS: "esports", ESPORT: "esports", SOCC: "soccer", SOCCER: "soccer" };
 const bvdCoupon = (p: string) => `/services/sports/event/coupon/events/A/description/${p}?marketFilterId=def&lang=en`;
 const bvdState: Record<string, string> = {};
+let bvdEspDiagN = 0;
 const bvdNum = (x: any) => { const n = parseFloat(String(x ?? "").replace(/[^0-9.+-]/g, "")); return Number.isFinite(n) ? n : NaN; };
 const bvdOpen = (x: any) => !x?.status || String(x.status).toUpperCase() === "O";
 function bvdCollect(ev: any, live: boolean, teams: string[], alt: boolean, out: FeedEv) {
@@ -646,6 +647,13 @@ function bvdCollect(ev: any, live: boolean, teams: string[], alt: boolean, out: 
     for (const m of g.markets ?? []) {
       if (!bvdOpen(m)) continue;
       const per = m.period ?? {}, pd = String(per.description ?? "");
+      // one-time raw dump of Bovada's actual esports period/market shape -- the map-period guess
+      // above (pd matching /^map\s*(\d+)/i) has no confirmed real sample behind it; this answers
+      // that directly instead of continuing to guess. Remove once confirmed either way.
+      if (out.sport === "esports" && bvdEspDiagN < 12) {
+        bvdEspDiagN++;
+        console.log(`BVD-ESPORTS-RAW #${bvdEspDiagN} period=${JSON.stringify(per)} desc=${JSON.stringify(m.description)} key=${JSON.stringify(m.key)}`);
+      }
       // esports best-of-N series: each individual map is modeled as its own period, the same
       // mechanism Bovada uses for halves/quarters elsewhere -- "Map 2" rather than "2nd Quarter".
       // Not confirmed against a real captured response the way the other period checks here were;
