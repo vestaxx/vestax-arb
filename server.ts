@@ -957,6 +957,14 @@ async function pullGemini() {
 }
 if (!GEM_OFF) (async () => { while (true) { try { await pullGemini(); } catch (e: any) { gemNote("error " + String(e?.message ?? e).slice(0, 80)); } await Bun.sleep(15000); } })();
 
+// matchFeed (unlike matchName) has never logged anything on a rejection -- it just silently returns
+// null, which looks identical whether the candidate pool was empty, too dissimilar, or (the case this
+// is actually for) correctly caught by the ambiguity guard: two candidates scoring too close together,
+// exactly what happens when one team's name is a literal prefix of another's ("Kansas" vs "Kansas
+// State") and bestSim can't confidently tell the pairing's orientation apart from its mirror image.
+// Logs each unique failing pairing once, with the actual reason, instead of asserting the ambiguity
+// theory without evidence.
+const FEED_NOMATCH_LOGGED = new Set<string>();
 function matchFeed(g: any, evs: FeedEv[], startP: number, kind: string): { ev: FeedEv; n0: string; n1: string } | null {
   const isLive = !!g.ev.live;
   const Ln: string[] = g.Ln ?? [g.L?.description], Sn: string[] = g.Sn ?? [g.S?.description];
@@ -973,7 +981,17 @@ function matchFeed(g: any, evs: FeedEv[], startP: number, kind: string): { ev: F
     const amb = Math.abs(straight - flipped) < 0.2;
     if (!b1 || sc > b1.sc) { b2 = Math.max(b2, b1?.sc ?? 0); b1 = { e, sc, lo, flip, amb }; } else b2 = Math.max(b2, sc);
   }
-  if (!b1 || b1.lo < 0.75 || b1.sc - b2 < 0.12 || b1.amb) return null;
+  if (!b1 || b1.lo < 0.75 || b1.sc - b2 < 0.12 || b1.amb) {
+    if (b1) {
+      const gKey = (Ln[0] ?? "") + "|" + (Sn[0] ?? "") + "|" + (b1.e.teams[0] ?? "") + "|" + (b1.e.teams[1] ?? "");
+      if (!FEED_NOMATCH_LOGGED.has(gKey)) {
+        FEED_NOMATCH_LOGGED.add(gKey);
+        const why = b1.amb ? "ORIENTATION-AMBIGUOUS" : b1.lo < 0.75 ? "low similarity" : "runner-up too close";
+        console.log(`FEED-NOMATCH ${Ln[0]} vs ${Sn[0]} | best "${b1.e.teams[0]}" vs "${b1.e.teams[1]}" sum=${b1.sc.toFixed(2)} min=${b1.lo.toFixed(2)} runnerUp=${b2.toFixed(2)} reason=${why}`);
+      }
+    }
+    return null;
+  }
   const [c1, c2] = b1.e.teams;
   return { ev: b1.e, n0: b1.flip ? c2 : c1, n1: b1.flip ? c1 : c2 };
 }
