@@ -1587,21 +1587,35 @@ async function scan(): Promise<number> {
     tstat.games++;
     for (const t of j.tots as any[]) {
       tstat.lines++;
-      const g = gT.get(t.line);
-      if (!g || !((g.over ?? 0) > 1) || !((g.under ?? 0) > 1)) continue;
-      tstat.overlap++;
-      const gOver = g.over as number, gUnder = g.under as number;
-      const fa = 1 / gOver, fb = 1 / gUnder, fairOver = fa / (fa + fb);
-      const pmMid = (t.over + (1 - t.under)) / 2;
-      if (Math.abs(pmMid - fairOver) > 0.15) {
-        if (diag) console.log(`TOT-INSANE ${j.L.description} vs ${j.S.description} ${t.line}: PM over ${pmMid.toFixed(2)} vs ${bk} ${fairOver.toFixed(2)} (skipped)`);
-        continue;
+      // middles: a gap between Polymarket's line and the other book's line where, if the final
+      // total lands inside that gap, BOTH sides win. The combined-probability guarantee that makes
+      // a normal same-line arb safe doesn't care whether the two lines match -- the gap only adds
+      // upside on top of the same worst-case floor, it never weakens it. So every line the other
+      // book currently offers is a candidate here, not just the one that happens to equal t.line
+      // (which is just the gap=0 case of the same thing, handled identically below).
+      const combos: { side: "o" | "u"; p: number; gtOdds: number; otherLine: number; gap: number }[] = [];
+      for (const [otherLine, g] of gT) {
+        if (!g) continue;
+        if (otherLine >= t.line && (g.under ?? 0) > 1) combos.push({ side: "o", p: t.over, gtOdds: g.under as number, otherLine, gap: otherLine - t.line });
+        if (otherLine <= t.line && (g.over ?? 0) > 1) combos.push({ side: "u", p: t.under, gtOdds: g.over as number, otherLine, gap: t.line - otherLine });
       }
-      const combos: { side: "o" | "u"; p: number; gtOdds: number }[] = [
-        { side: "o", p: t.over, gtOdds: gUnder },
-        { side: "u", p: t.under, gtOdds: gOver },
-      ];
+      if (!combos.length) continue;
+      tstat.overlap++;
       for (const c of combos) {
+        // the fair-price sanity check only makes sense for an exact-line match (it compares PM's
+        // price against the SAME line's fair probability) -- a middle is two different lines on
+        // purpose, so there's no single "fair price" to compare it against the same way. Every
+        // combo, middle or not, still goes through the pct/cap/depth checks below regardless,
+        // which is the real guardrail and doesn't care about the gap either.
+        if (c.gap === 0) {
+          const gExact = gT.get(t.line)!;
+          const fa = 1 / (gExact.over as number), fb = 1 / (gExact.under as number), fairOver = fa / (fa + fb);
+          const pmMid = (t.over + (1 - t.under)) / 2;
+          if (Math.abs(pmMid - fairOver) > 0.15) {
+            if (diag) console.log(`TOT-INSANE ${j.L.description} vs ${j.S.description} ${t.line}: PM over ${pmMid.toFixed(2)} vs ${bk} ${fairOver.toFixed(2)} (skipped)`);
+            continue;
+          }
+        }
         if (!(c.p > 0.01 && c.p < 0.99) || !(c.gtOdds > 1)) continue;
         if ((1 / (1 / pmDecimal(c.p) + 1 / c.gtOdds) - 1) * 100 < -3) continue;
         tstat.cand++;
@@ -1617,7 +1631,8 @@ async function scan(): Promise<number> {
         const dPm = pmDecimal(p);
         const pct = (1 / (1 / dPm + 1 / c.gtOdds) - 1) * 100;
         const matchup = `${j.L.description} vs ${j.S.description}`;
-        noteClose(pct, `Total ${t.line}: ${matchup} (${j.ge.sport.name})`);
+        const label = c.gap > 0 ? `Total ${t.line}/${c.otherLine} middle` : `Total ${t.line}`;
+        noteClose(pct, `${label}: ${matchup} (${j.ge.sport.name})`);
         if (pct <= 0) continue;
         // this cap applies regardless of source (feed-matched or the direct Polymarket-vs-Goated
         // id/name-matched path) -- see the comment on the moneyline check below for why the old
@@ -1625,22 +1640,24 @@ async function scan(): Promise<number> {
         if (pct > FEED_MAX_PCT) { capSkip++; continue; }
         const dp = await pmDepth(t.slug, c.side === "o", dPm, c.gtOdds, liq);
         if (!dp.ok) { lqSkip++; continue; }
-        const key = "T|" + t.slug + "|" + c.side + sfx;
+        const key = "T|" + t.slug + "|" + c.side + (c.gap > 0 ? "-mid" + c.otherLine : "") + sfx;
         keys.add(key);
         tstat.arbs++;
         const pmOver = c.side === "o";
+        const paName = pmOver ? "Over " + t.line : "Under " + t.line;
+        const pbName = pmOver ? "Under " + c.otherLine : "Over " + c.otherLine;
         const rowPm = { book: "polymarket", odds: dPm, liq: dp.depth || null };
         const rowGt = { book: bk, odds: c.gtOdds, liq: null };
         const A = pmOver ? rowPm : rowGt, B = pmOver ? rowGt : rowPm;
         const uA = pmOver ? pmUrl : gtUrl, uB = pmOver ? gtUrl : pmUrl;
-        const fs = await upsertArb({ key, sport: j.ge.sport.name, league: matchup, market: "Total " + t.line, pa: "Over " + t.line, pb: "Under " + t.line, start: j.start, live: !!j.live, A, B, pct, uA, uB });
-        console.log(`ARB ${pct.toFixed(2)}% TOTAL ${t.line} ${matchup} (${pmOver ? "Over" : "Under"} on PM, ${pmOver ? "Under" : "Over"} on ${bk}) depth $${Math.round(dp.depth)} (${j.ge.sport.name})`);
+        const fs = await upsertArb({ key, sport: j.ge.sport.name, league: matchup, market: c.gap > 0 ? `Middle ${t.line}/${c.otherLine}` : "Total " + t.line, pa: paName, pb: pbName, start: j.start, live: !!j.live, A, B, pct, uA, uB });
+        console.log(`ARB ${pct.toFixed(2)}% ${c.gap > 0 ? "MIDDLE" : "TOTAL"} ${paName} / ${pbName} ${matchup} (${pmOver ? "Over" : "Under"} on PM, ${pmOver ? "Under" : "Over"} on ${bk}) depth $${Math.round(dp.depth)} (${j.ge.sport.name})`);
         if (pct >= ALERT_ANY_PCT && fs && Date.now() - new Date(fs).getTime() < 20000) {
           const ia = 1 / dPm, ib = 1 / c.gtOdds;
           alertArb({
-            key, pct, sport: j.ge.sport.name, league: `Total ${t.line} · ${j.ge.league}`, live: !!j.live, start: j.start,
-            pmName: `${pmOver ? "Over" : "Under"} ${t.line} (${matchup})`, pmCents: Math.round(p * 100), pmLiq: dp.depth,
-            gtName: `${pmOver ? "Under" : "Over"} ${t.line}`, gtLabel: glabel(j), gtOdds: c.gtOdds,
+            key, pct, sport: j.ge.sport.name, league: `${label} · ${j.ge.league}`, live: !!j.live, start: j.start,
+            pmName: `${paName} (${matchup})`, pmCents: Math.round(p * 100), pmLiq: dp.depth,
+            gtName: pbName, gtLabel: glabel(j), gtOdds: c.gtOdds,
             stakePm: (ALERT_BANKROLL * ia) / (ia + ib), stakeGt: (ALERT_BANKROLL * ib) / (ia + ib), pmUrl, gtUrl,
           });
         }
