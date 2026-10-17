@@ -650,9 +650,12 @@ function bvdCollect(ev: any, live: boolean, teams: string[], alt: boolean, out: 
       // one-time raw dump of Bovada's actual esports period/market shape -- the map-period guess
       // above (pd matching /^map\s*(\d+)/i) has no confirmed real sample behind it; this answers
       // that directly instead of continuing to guess. Remove once confirmed either way.
-      if (out.sport === "esports" && bvdEspDiagN < 12) {
+      if (out.sport === "esports" && bvdEspDiagN < 200) {
         bvdEspDiagN++;
-        console.log(`BVD-ESPORTS-RAW #${bvdEspDiagN} period=${JSON.stringify(per)} desc=${JSON.stringify(m.description)} key=${JSON.stringify(m.key)}`);
+        // only log periods that AREN'T the plain full-match "Game" one, since those are already
+        // confirmed and just noise now -- this is specifically hunting for whatever a per-map
+        // period actually looks like, if Bovada exposes one at all on this endpoint
+        if (per.description !== "Game") console.log(`BVD-ESPORTS-RAW #${bvdEspDiagN} period=${JSON.stringify(per)} desc=${JSON.stringify(m.description)} key=${JSON.stringify(m.key)}`);
       }
       // esports best-of-N series: each individual map is modeled as its own period, the same
       // mechanism Bovada uses for halves/quarters elsewhere -- "Map 2" rather than "2nd Quarter".
