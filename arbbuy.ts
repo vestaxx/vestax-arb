@@ -206,7 +206,7 @@ d.log.forEach(function(x){var e=document.createElement("div");e.textContent=new 
 function loadStatus(){fetch("/api/auto").then(function(r){return r.json()}).then(show).catch(function(){$("s").textContent="Could not load. Are you logged in?";});}
 $("b").onclick=function(){this.disabled=true;fetch("/api/tracker/auto",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({on:!cur})}).then(function(r){return r.json()}).then(show).catch(loadStatus);};
 function summ(j){if(j.error)return "Not bought: "+j.error;var p=j.plan||{},g=j.goated||{},m=j.polymarket||{};
-return "Goated $"+(p.goated?p.goated.stake:"?")+" @ "+(p.goated?p.goated.odds:"?")+": "+(g.ok?"OK":"FAILED ("+g.error+")")+"\nPolymarket $"+(p.polymarket?p.polymarket.cash:"?")+": "+(m.done?"OK":"NOT FULLY FILLED"+(m.error?" ("+m.error+")":""))+(j.tracked?"\nLogged to tracker.":"");}
+return "Goated $"+(p.goated?p.goated.stake:"?")+" @ "+(p.goated?p.goated.odds:"?")+": "+(g.ok?"OK":"FAILED ("+g.error+")")+"\\nPolymarket $"+(p.polymarket?p.polymarket.cash:"?")+": "+(m.done?"OK":"NOT FULLY FILLED"+(m.error?" ("+m.error+")":""))+(j.tracked?"\\nLogged to tracker.":"");}
 function buy(id,btn,out){if(busy[id])return;busy[id]=true;btn.disabled=true;btn.textContent="Buying...";out.textContent="";
 fetch("/api/tracker/arb-buy",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({id:id,bankroll:bank,dry:false})})
 .then(function(r){return r.json()}).then(function(j){results[id]=summ(j)}).catch(function(e){results[id]="Network error: "+e})
