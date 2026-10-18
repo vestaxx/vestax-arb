@@ -2161,7 +2161,7 @@ Bun.serve({
     if (url.pathname === "/api/test-alert") {
       const ok = await ntfy("VeSTAX ARBS test alert", "Test alert: if you can read this, phone alerts are working.", "default", PAGE_URL, `view, Arbs page, ${PAGE_URL}`);
       return Response.json({ sent: ok, topicSet: !!NTFY_TOPIC }, { headers: { "cache-control": "no-store", ...sec } });
-    }
+    }    if (url.pathname === "/api/goated-probe") return goatedProbeRoute(url, sec, gtEvents, gt);
     if (url.pathname !== "/") return new Response("Not found", { status: 404, headers: sec });
     const html = await getPage();
     if (!html) return new Response("The page is not available right now. Refresh in a moment.", { status: 503, headers: { "content-type": "text/plain; charset=utf-8", ...sec } });
