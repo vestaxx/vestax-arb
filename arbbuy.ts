@@ -184,23 +184,45 @@ export function makeArbBuy(d: Deps) {
     return autoStatus();
   }
 
-  const autoPage = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>VeSTAX auto-fire</title>
-<style>body{margin:0;background:#0b0d12;color:#e8e8ea;font-family:system-ui,sans-serif}main{max-width:460px;margin:0 auto;padding:24px 16px}
-h1{font-size:1.25rem;margin:0 0 4px}p{color:#9aa0ad;margin:6px 0}button{width:100%;padding:22px;border:0;border-radius:16px;font-size:1.3rem;font-weight:800;color:#fff;margin:18px 0}
-.on{background:#1f9d55}.off{background:#c0392b}.card{background:#11141b;border:1px solid #23262f;border-radius:14px;padding:12px 14px;margin-top:12px;font-size:.92rem}
-.log div{padding:4px 0;border-bottom:1px solid #1b1e27}.log div:last-child{border:0}small{color:#7b8190}</style></head><body><main>
-<h1>VeSTAX auto-fire</h1><p id="s">Loading...</p><button id="b" class="off" disabled>...</button>
-<div class="card" id="i"></div><div class="card log" id="l"></div>
+  const autoPage = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>VeSTAX buy</title>
+<style>body{margin:0;background:#0b0d12;color:#e8e8ea;font-family:system-ui,sans-serif}main{max-width:480px;margin:0 auto;padding:20px 14px 40px}
+h1{font-size:1.25rem;margin:0 0 4px}h2{font-size:1.05rem;margin:22px 0 4px}p{color:#9aa0ad;margin:6px 0}
+button{width:100%;border:0;border-radius:14px;font-weight:800;color:#fff}#b{padding:20px;font-size:1.15rem;margin:14px 0}
+.on{background:#1f9d55}.off{background:#c0392b}.card{background:#11141b;border:1px solid #23262f;border-radius:14px;padding:12px 14px;margin-top:10px;font-size:.92rem}
+.t{font-weight:700;font-size:1rem;margin-bottom:2px}.buy{background:#2e5cff;padding:16px;font-size:1.05rem;margin-top:10px}.buy:disabled{background:#3a4258}
+.out{white-space:pre-line;margin-top:8px;color:#cfd3dc;font-size:.88rem}.log div{padding:4px 0;border-bottom:1px solid #1b1e27}.log div:last-child{border:0}small{color:#7b8190}</style></head><body><main>
+<h1>VeSTAX</h1><button id="b" class="off" disabled>...</button><p id="s">Loading...</p>
+<h2>Goated vs Polymarket arbs</h2><p id="hint">Tap BUY to place both bets from here. Nothing opens.</p><div id="arbs">Loading...</div>
+<h2>Auto-fire</h2><div class="card" id="i"></div><div class="card log" id="l"></div>
 <script>
-var cur=false;
-function show(d){cur=!!d.on;var b=document.getElementById("b");b.disabled=false;b.className=cur?"on":"off";b.textContent=cur?"AUTO-FIRE IS ON (tap to turn off)":"AUTO-FIRE IS OFF (tap to turn on)";
-document.getElementById("s").textContent=cur?"Buying by itself on Goated vs Polymarket moneyline arbs.":"Nothing will be bought by itself.";
-document.getElementById("i").textContent="Fires at "+d.minPct+"% or better, $"+d.bankroll+" per buy, max "+d.perDayCap+" per 24h. Done in last 24h: "+(d.todayCount===null?"?":d.todayCount)+".";
-var l=document.getElementById("l");l.innerHTML="";if(!d.log.length){l.textContent="No activity yet since the last restart.";}
+var cur=false,bank=5,results={},busy={};
+function $(i){return document.getElementById(i)}
+function show(d){cur=!!d.on;bank=d.bankroll||bank;var b=$("b");b.disabled=false;b.className=cur?"on":"off";
+b.textContent=cur?"AUTO-FIRE IS ON (tap to turn off)":"AUTO-FIRE IS OFF (tap to turn on)";
+$("s").textContent=cur?"Buying by itself on Goated vs Polymarket moneyline arbs.":"Nothing will be bought by itself.";
+$("i").textContent="Fires at "+d.minPct+"% or better, $"+d.bankroll+" per buy, max "+d.perDayCap+" per 24h. Done in last 24h: "+(d.todayCount===null?"?":d.todayCount)+".";
+var l=$("l");l.innerHTML="";if(!d.log.length){l.textContent="No activity yet since the last restart.";}
 d.log.forEach(function(x){var e=document.createElement("div");e.textContent=new Date(x.at).toLocaleTimeString()+"  "+x.text;l.appendChild(e);});}
-function load(){fetch("/api/auto").then(function(r){return r.json()}).then(show).catch(function(){document.getElementById("s").textContent="Could not load. Are you logged in?";});}
-document.getElementById("b").onclick=function(){this.disabled=true;fetch("/api/tracker/auto",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({on:!cur})}).then(function(r){return r.json()}).then(show).catch(load);};
-load();setInterval(load,15000);
+function loadStatus(){fetch("/api/auto").then(function(r){return r.json()}).then(show).catch(function(){$("s").textContent="Could not load. Are you logged in?";});}
+$("b").onclick=function(){this.disabled=true;fetch("/api/tracker/auto",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({on:!cur})}).then(function(r){return r.json()}).then(show).catch(loadStatus);};
+function summ(j){if(j.error)return "Not bought: "+j.error;var p=j.plan||{},g=j.goated||{},m=j.polymarket||{};
+return "Goated $"+(p.goated?p.goated.stake:"?")+" @ "+(p.goated?p.goated.odds:"?")+": "+(g.ok?"OK":"FAILED ("+g.error+")")+"\nPolymarket $"+(p.polymarket?p.polymarket.cash:"?")+": "+(m.done?"OK":"NOT FULLY FILLED"+(m.error?" ("+m.error+")":""))+(j.tracked?"\nLogged to tracker.":"");}
+function buy(id,btn,out){if(busy[id])return;busy[id]=true;btn.disabled=true;btn.textContent="Buying...";out.textContent="";
+fetch("/api/tracker/arb-buy",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({id:id,bankroll:bank,dry:false})})
+.then(function(r){return r.json()}).then(function(j){results[id]=summ(j)}).catch(function(e){results[id]="Network error: "+e})
+.then(function(){busy[id]=false;loadArbs();});}
+function card(r){var c=document.createElement("div");c.className="card";
+var t=document.createElement("div");t.className="t";t.textContent=r.player_a+" vs "+r.player_b;
+var m=document.createElement("small");m.textContent=(r.is_live?"LIVE | ":"")+r.sport+" | "+r.league+" | "+Number(r.profit_pct).toFixed(2)+"%";
+var btn=document.createElement("button");btn.className="buy";var out=document.createElement("div");out.className="out";
+if(busy[r.id]){btn.disabled=true;btn.textContent="Buying...";}else{btn.textContent="BUY $"+bank+" (both legs)";}
+out.textContent=results[r.id]||"";btn.onclick=function(){buy(r.id,btn,out)};
+c.appendChild(t);c.appendChild(m);c.appendChild(btn);c.appendChild(out);return c;}
+function isGP(r){return r.market==="Moneyline"&&((r.book_a==="goated"&&r.book_b==="polymarket")||(r.book_b==="goated"&&r.book_a==="polymarket"));}
+function loadArbs(){fetch("/api/arbs").then(function(r){return r.json()}).then(function(d){var el=$("arbs");el.innerHTML="";var list=(d.rows||[]).filter(isGP);
+if(!list.length){el.textContent="No Goated vs Polymarket arbs right now.";}list.forEach(function(r){el.appendChild(card(r));});})
+.catch(function(){$("arbs").textContent="Could not load arbs. Are you logged in?";});}
+loadStatus();loadArbs();setInterval(loadStatus,15000);setInterval(loadArbs,4000);
 </script></main></body></html>`;
 
   return Object.assign(arbBuy, { autoTry, autoStatus, autoSet, autoPage });
