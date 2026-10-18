@@ -2,6 +2,8 @@
 // BET105 HEADLESS TEST (Oct 14 2026): one-shot probe via Browserless to see if Cloudflare still blocks a real headless browser.
 import { SQL } from "bun";
 import { PolymarketUS } from "polymarket-us";
+import { makeArbBuy } from "./arbbuy";
+const arbGoatedLegs = new Map<string, any>();
 import { goatedProbeRoute } from "./goated-probe";
 const sql = new SQL({ url: Bun.env.DATABASE_URL!, max: 3, idleTimeout: 30 });
 const KEY = Bun.env.ARB_KEY ?? "";
@@ -1911,6 +1913,7 @@ async function scan(): Promise<number> {
             const pmLong = leg.side === "a";
             const rowPm = { book: "polymarket", odds: dPm, liq: dp.depth || null };
             const rowGt = { book: bk, odds: dGt, liq: null };
+                        if (bk === "goated") { const gc = j.ge.comps.find((c: any) => c.id === leg.other); if (gc) arbGoatedLegs.set(key, { slug: j.ge.slug, q: gc.q, name: gc.name, at: Date.now() }); }
             const A = pmLong ? rowPm : rowGt, B = pmLong ? rowGt : rowPm;
             const uA = pmLong ? pmUrl : gtUrl, uB = pmLong ? gtUrl : pmUrl;
             const fs = await upsertArb({ key, sport: j.ge.sport.name, league: j.ge.league, market: "Moneyline", pa: j.L.description, pb: j.S.description, start: j.start, live: !!j.live, A, B, pct, uA, uB });
@@ -2100,7 +2103,7 @@ input{width:100%;box-sizing:border-box;background:#0b0d12;color:#e8e8ea;border:1
 button{margin-top:12px;width:100%;padding:12px;border:0;border-radius:999px;background:#2e5cff;color:#fff;font-weight:700;font-size:1rem}</style></head>
 <body><form method="GET" action="/"><img src="/logo.png" alt=""/><h1>VeSTAX ARBS</h1>
 <input name="key" type="password" placeholder="Passcode" autocomplete="current-password"/><button>Enter</button></form></body></html>`;
-
+const arbBuy = makeArbBuy({ sql, trade, tradeQuote, pmDecimal, wholePair, ntfy, trackerAdd, legs: arbGoatedLegs });
 Bun.serve({
   port: Number(Bun.env.PORT ?? 3000),
   async fetch(req) {
@@ -2143,6 +2146,7 @@ Bun.serve({
         else if (url.pathname === "/api/tracker/settle") out = await trackerSettle(body);
         else if (url.pathname === "/api/tracker/delete") out = await trackerDelete(body);
         else if (url.pathname === "/api/trade") out = await trade(body);
+                  else if (url.pathname === "/api/tracker/arb-buy") out = await arbBuy(body);
         else if (url.pathname === "/api/scan") out = await scanShots(body);
         else return Response.json({ error: "not found" }, { status: 404, headers: sec });
         return Response.json(out, { headers: { "cache-control": "no-store", ...sec } });
