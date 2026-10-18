@@ -137,6 +137,12 @@ async function placeBuy(slug: string, long: boolean, cash: number, p0: number, b
 async function trade(body: any) {
   if (!TRADE_ON || !trader) throw new Error("One-tap buying is switched off.");
   if (await checkCircuitBreaker()) throw new Error(`Trading is automatically paused -- too many recent hedge attempts failed to fill. Check your notifications, then POST /api/breaker/reset to resume.`);
+  // the client sends this explicitly: "auto" from the background autoTryGoatedPair loop, "manual"
+  // from a person actually clicking the link themselves. Both paths otherwise call the exact same
+  // tmOpen(id, true) and send an otherwise-identical request, so without this the two were
+  // indistinguishable after the fact -- this is purely a label for review, nothing here changes
+  // behavior based on it.
+  const triggeredBy = body?.triggeredBy === "auto" || body?.triggeredBy === "manual" ? body.triggeredBy : null;
   const id = Number(body?.id);
   if (!Number.isInteger(id)) throw new Error("bad id");
   const mode: "quote" | "buy" | "force" = body?.mode === "buy" || body?.mode === "force" ? body.mode : "quote";
@@ -253,8 +259,8 @@ async function trade(body: any) {
   const avg = filled > 0 ? notional / filled : null;
   const tInsert0 = performance.now();
   try {
-    await sql`INSERT INTO arb_trades (opp_id, opp_key, mode, goated_stake, goated_payout, wanted_shares, filled_shares, avg_paid, cost_est, ceiling, order_ids, note)
-              VALUES (${id}, ${key}, ${mode}, ${gStake}, ${gPay}, ${remaining}, ${filled}, ${avg}, ${spent}, ${ceiling}, ${ids.join(",") || null}, ${stop || (additional ? "additional stake" : null)})`;
+    await sql`INSERT INTO arb_trades (opp_id, opp_key, mode, goated_stake, goated_payout, wanted_shares, filled_shares, avg_paid, cost_est, ceiling, order_ids, note, triggered_by)
+              VALUES (${id}, ${key}, ${mode}, ${gStake}, ${gPay}, ${remaining}, ${filled}, ${avg}, ${spent}, ${ceiling}, ${ids.join(",") || null}, ${stop || (additional ? "additional stake" : null)}, ${triggeredBy})`;
   } catch (e: any) { console.error("trade log failed:", e?.message ?? e); }
   const insertMs = Math.round(performance.now() - tInsert0);
   console.log(`TRADE ${mode}${cashMode ? " cash $" + C : ""} ${slug} ${long ? "long" : "short"}: filled ${filled.toFixed(2)} shares for ~$${spent.toFixed(2)}, avg ${avg == null ? "-" : avg.toFixed(4)}, ceiling ${ceiling}${stop ? ", stopped: " + stop : ""}`);
