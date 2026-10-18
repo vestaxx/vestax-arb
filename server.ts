@@ -59,6 +59,7 @@ const tradeBusy = new Set<number>();
 console.log(`One-tap buy: ${TRADE_ON ? "ON" : "off"}, keys loaded=${!!trader}, cap=$${TRADE_MAX_USD}, force=+${Math.round((FORCE_MULT - 1) * 100)}%, max slippage ${MAX_SLIPPAGE_BIPS}bips`);
 console.log(`DEXSPORT_DEBUG_ROUTE_MARKER_V3: ${Bun.env.DEXSPORT_DEBUG_TOKEN ? "token set" : "NO TOKEN"}`);
 
+let zeroFillRawDiagN = 0;
 const costPerShare = (p: number) => p + FEE * p * (1 - p);
 function wholePair(bank: number, oA: number, oB: number): [number, number] | null {
   if (!(bank >= 2) || !(oA > 1) || !(oB > 1)) return null;
@@ -132,7 +133,7 @@ async function placeBuy(slug: string, long: boolean, cash: number, p0: number, b
     if (/manual_?order_?indicator/i.test(String(e?.message ?? e))) res = await trader.orders.create(make("MANUAL_ORDER_INDICATOR_AUTOMATIC"));
     else throw e;
   }
-  return readFill(res);
+  return { ...readFill(res), raw: res };
 }
 async function trade(body: any) {
   if (!TRADE_ON || !trader) throw new Error("One-tap buying is switched off.");
@@ -250,6 +251,17 @@ async function trade(body: any) {
       } else {
         stop = "nothing more was available at or below the limit";
         console.log(`ZERO-FILL-DIAG slug=${slug} px=${px} ceiling=${ceiling} bips=${bips} cash=${cash.toFixed(2)} status=${JSON.stringify(f.status)} reason=${JSON.stringify(f.reason)} orderId=${f.orderId}`);
+        // readFill only pulls out shares/price/orderId/status/reason -- confirmed real data just
+        // showed status "ORDER_STATE_NEW" (a pending state, not a rejection or empty-book cancel) on
+        // two zero-fill orders despite synchronousExecution:true, which is supposed to mean the call
+        // doesn't return until the IOC order has actually resolved. Either that flag isn't doing what
+        // it says, or the real terminal status/fill data lives somewhere in the response that the
+        // generic recursive walk in readFill isn't finding correctly. Need the complete raw object,
+        // not just the fields we've guessed matter, to tell those two apart.
+        if (f.status === "ORDER_STATE_NEW" && zeroFillRawDiagN < 5) {
+          zeroFillRawDiagN++;
+          console.log(`ZERO-FILL-RAW-DIAG #${zeroFillRawDiagN} orderId=${f.orderId} raw=${JSON.stringify(f.raw)}`);
+        }
         break;
       }
       if (more()) await Bun.sleep(150);
@@ -710,7 +722,16 @@ async function gtMarkets(ev: any): Promise<{ winner: Record<string, number> | nu
 type FeedEv = { teams: [string, string]; spreads: { team: string; line: number; odds: number }[]; totals: { line: number; over?: number; under?: number }[]; ml: Record<string, number>; live: boolean; start?: number; url?: string; link?: string; league?: string; sport?: string; mapMl?: Record<number, Record<string, number>> };
 const feeds: Record<string, Map<string, { at: number; ev: FeedEv }>> = { bet105: new Map(), bovada: new Map(), gemini: new Map() };
 const FEED_BOOKS = ["bet105", "bovada", "gemini"];
-const FEED_TTL: Record<string, number> = { bet105: 100000, bovada: 30000, gemini: 45000 };
+// bovada's non-live TTL was 30000 -- a third of bet105's and well under gemini's, despite all three
+// serving the same purpose (pre-match data with no need for second-by-second freshness). esports
+// specifically is the most exposed to this: when the primary "esports" fetch misses, it falls
+// through up to 4 sequential sub-paths (CS2/LoL/Dota2/Valorant), each its own round trip, easily
+// enough combined with everything else ahead of it in pullBovada()'s loop to exceed 30s before the
+// next refresh lands -- confirmed in logs: this exact matchup (Copenhagen Wolves vs Sokerorg)
+// matched and produced real arbs at 23:35/23:43, then repeatedly showed EVERY candidate in the pool
+// failing the sport check (not a matching bug, just the esports entries having already expired) at
+// several other points across the same evening. Raised to be consistent with the other two books.
+const FEED_TTL: Record<string, number> = { bet105: 100000, bovada: 90000, gemini: 45000 };
 const FEED_LABEL: Record<string, string> = { bet105: "Bet105", bovada: "Bovada", gemini: "Gemini", goated: "Goated" };
 const FEED_SFX: Record<string, string> = { bet105: "~b105", bovada: "~bvd", gemini: "~gem" };
 const B105_TOKEN = Bun.env.B105_TOKEN ?? "";
