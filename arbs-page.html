@@ -1,0 +1,1412 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
+<meta name="robots" content="noindex,nofollow"/>
+<title>VeSTAX ARBS</title>
+<link rel="icon" href="/logo.png"/>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet"/>
+<style>
+  :root { --bg:#0b0d12; --card:#11141b; --card2:#151923; --border:#23262f; --fg:#e8e8ea; --muted:#8b919c;
+          --win:#22c55e; --loss:#ef4444; --open:#f59e0b; --scope:#ff3b3b; --blue:#2e5cff;
+          --mono:'JetBrains Mono', ui-monospace, Menlo, monospace; }
+  * { box-sizing:border-box; }
+  html, body { margin:0; background:var(--bg); color:var(--fg); font-family:Inter, system-ui, -apple-system, Segoe UI, sans-serif; }
+  body { padding: env(safe-area-inset-top,0) 0 env(safe-area-inset-bottom,0); }
+  .wrap { max-width:760px; margin:0 auto; padding:22px 14px 56px; }
+  header { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+  .brand { display:flex; align-items:center; gap:12px; }
+  .brand img { width:42px; height:42px; border-radius:9px; object-fit:cover; }
+  h1 { font-size:clamp(1.45rem,5.5vw,1.9rem); font-weight:800; margin:0; letter-spacing:-.01em; }
+  .sniper { --s:var(--scope); position:relative; display:inline-block; padding:.08em .45em; margin-left:.12em; letter-spacing:.08em; }
+  .sniper i { position:absolute; width:.42em; height:.42em; border:0 solid var(--s); animation:lock 2.4s ease-in-out infinite; }
+  .sniper i.tl { top:0; left:0; border-top-width:2px; border-left-width:2px; --dx:-3px; --dy:-3px; }
+  .sniper i.tr { top:0; right:0; border-top-width:2px; border-right-width:2px; --dx:3px; --dy:-3px; }
+  .sniper i.bl { bottom:0; left:0; border-bottom-width:2px; border-left-width:2px; --dx:-3px; --dy:3px; }
+  .sniper i.br { bottom:0; right:0; border-bottom-width:2px; border-right-width:2px; --dx:3px; --dy:3px; }
+  @keyframes lock { 0%,100% { translate:0 0; } 50% { translate:var(--dx) var(--dy); } }
+  .sub { color:var(--muted); font-size:.85rem; margin-top:2px; }
+  .pulse { display:inline-flex; align-items:center; gap:7px; font-family:var(--mono); font-size:.75rem; color:var(--muted);
+           border:1px solid var(--border); border-radius:999px; padding:6px 11px; white-space:nowrap; }
+  .pulse::before { content:""; width:8px; height:8px; border-radius:50%; background:var(--win); box-shadow:0 0 8px var(--win); animation:blink 1.4s infinite; }
+  .pulse.stale::before { background:var(--loss); box-shadow:0 0 8px var(--loss); }
+  @keyframes blink { 50% { opacity:.3; } }
+  .controls { display:flex; gap:10px; align-items:center; justify-content:space-between; flex-wrap:wrap; margin:22px 0 14px; }
+  .seg { display:inline-flex; background:var(--card); border:1px solid var(--border); border-radius:12px; padding:4px; }
+  .seg button { appearance:none; border:0; background:transparent; color:var(--muted); font:600 .95rem Inter, sans-serif; padding:8px 16px; border-radius:9px; cursor:pointer; }
+  .seg button.on { background:var(--card2); color:var(--fg); box-shadow:inset 0 0 0 1px var(--border); }
+  .seg button .n { font-family:var(--mono); font-size:.75rem; color:var(--muted); margin-left:6px; }
+  .ctl-right { display:flex; gap:8px; align-items:center; }
+  .snd { appearance:none; border:1px solid var(--border); background:var(--card); color:var(--muted); border-radius:12px; padding:9px 12px; font:600 .85rem Inter, sans-serif; cursor:pointer; white-space:nowrap; }
+  .snd.on { color:var(--fg); border-color:rgba(34,197,94,.5); }
+  .autobet.off { border-color:rgba(248,113,113,.6); color:#f87171; }
+  .bank { display:flex; align-items:center; gap:8px; background:var(--card); border:1px solid var(--border); border-radius:12px; padding:6px 6px 6px 12px; }
+  .bank span { color:var(--muted); font-size:.75rem; letter-spacing:.06em; }
+  .bank input { width:84px; background:var(--bg); color:var(--fg); border:1px solid var(--border); border-radius:8px; padding:7px 9px; font:500 .95rem var(--mono); outline:none; }
+  .bank input:focus { border-color:#3a3f4b; box-shadow:0 0 0 3px rgba(46,92,255,.18); }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:16px; overflow:hidden; margin-bottom:14px; animation:rise .35s ease both; }
+  @keyframes rise { from { opacity:0; transform:translateY(6px); } }
+  .top { padding:16px 18px 14px; display:grid; grid-template-columns:1fr auto; gap:6px 12px; }
+  .pct { display:flex; align-items:center; gap:10px; }
+  .pct b { font:800 2rem Inter, sans-serif; color:var(--win); letter-spacing:-.02em; }
+  .pill { font-family:var(--mono); font-size:.85rem; color:var(--win); border:1px solid rgba(34,197,94,.35); background:rgba(34,197,94,.08); border-radius:8px; padding:3px 8px; }
+  .when { text-align:right; color:var(--muted); font-size:.9rem; align-self:center; white-space:nowrap; }
+  .tag { font-family:var(--mono); font-size:.72rem; padding:3px 8px; border-radius:6px; margin-left:6px; }
+  .tag.live { color:#ff6b6b; border:1px solid rgba(255,59,59,.45); background:rgba(255,59,59,.08); }
+  .tag.new { color:var(--open); border:1px solid rgba(245,158,11,.4); background:rgba(245,158,11,.08); }
+  .tag.settled { color:var(--win); border:1px solid rgba(34,197,94,.4); background:rgba(34,197,94,.08); }
+  .tag.other { color:var(--muted); border:1px solid var(--border); }
+  .age { font-family:var(--mono); font-size:.72rem; color:var(--muted); margin-left:6px; }
+  .sport { color:var(--muted); font-size:.85rem; display:flex; align-items:center; gap:6px; }
+  .mkt { font-weight:800; font-size:1.2rem; margin-top:2px; }
+  .vs { text-align:right; color:var(--muted); font-size:.9rem; align-self:end; line-height:1.35; }
+  .legs { display:grid; grid-template-columns:1fr 1fr; background:var(--card2); border-top:1px solid var(--border); }
+  .leg { padding:14px 16px 16px; display:flex; flex-direction:column; gap:8px; min-width:0; }
+  .leg + .leg { border-left:1px solid var(--border); }
+  .who { font-size:1.05rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .row { display:flex; align-items:flex-end; justify-content:space-between; gap:8px; }
+  .stake { font:700 1.35rem var(--mono); }
+  .meta { color:var(--muted); font-size:.78rem; margin-top:3px; font-family:var(--mono); }
+  .meta .c { color:#7fb2ff; }
+  .odds { display:inline-flex; align-items:center; gap:7px; padding:5px 10px 5px 5px; border-radius:10px; border:1px solid rgba(34,197,94,.45); background:rgba(34,197,94,.10);
+          font:700 1.05rem var(--mono); text-decoration:none; color:var(--fg); white-space:nowrap; }
+  a.odds { cursor:pointer; -webkit-tap-highlight-color:transparent; transition:background .15s, border-color .15s; }
+  a.odds:hover, a.odds:active { background:rgba(34,197,94,.22); border-color:rgba(34,197,94,.8); }
+  a.odds .go { font-size:.75rem; opacity:.7; margin-left:1px; }
+  button.odds { appearance:none; font:700 1.05rem var(--mono); color:var(--fg); cursor:pointer; -webkit-tap-highlight-color:transparent; transition:background .15s, border-color .15s; }
+  button.odds:hover, button.odds:active { background:rgba(34,197,94,.22); border-color:rgba(34,197,94,.8); }
+  button.odds:disabled { opacity:.5; cursor:default; }
+  button.odds .go { font-size:.8rem; opacity:.9; margin-left:1px; }
+  #vxres { position:fixed; left:10px; right:10px; bottom:calc(10px + env(safe-area-inset-bottom,0px)); max-width:560px; margin:0 auto; z-index:60; background:var(--card2); border:1px solid var(--border); border-radius:14px; padding:12px 14px; font:500 .9rem Inter, sans-serif; white-space:pre-line; box-shadow:0 8px 30px rgba(0,0,0,.6); }
+  #vxres[hidden] { display:none; }
+  #vxres b { display:block; margin-bottom:4px; font-size:1rem; }
+  #vxres .x { float:right; background:none; border:0; color:var(--muted); font-size:1.2rem; cursor:pointer; padding:0 2px; }
+  .peek { display:inline-flex; align-items:center; justify-content:center; width:34px; height:34px; border-radius:10px; border:1px solid var(--border); background:var(--card2); text-decoration:none; font-size:1rem; color:var(--muted); -webkit-tap-highlight-color:transparent; }
+  .peek:hover, .peek:active { border-color:#3a3f4b; color:var(--fg); }
+  .editbtn { appearance:none; border:1px solid var(--border); background:var(--card2); color:var(--muted); border-radius:8px; width:28px; height:28px; font-size:.85rem; cursor:pointer; margin-left:8px; }
+  .editbtn:hover, .editbtn:active { border-color:#3a3f4b; color:var(--fg); }
+  .stakein { width:90px; background:#0b0d12; color:var(--fg); border:1px solid rgba(46,92,255,.6); border-radius:8px; padding:6px 8px; font:700 1.1rem var(--mono); outline:none; }
+  .stakein:focus { box-shadow:0 0 0 3px rgba(46,92,255,.18); }
+  .editbar { padding:10px 16px 12px; background:var(--card2); border-top:1px solid var(--border); display:flex; gap:8px; }
+  .bookf { position:relative; }
+  .bookf > button { appearance:none; border:1px solid var(--border); background:var(--card); color:var(--muted); border-radius:12px; padding:9px 12px; font:600 .85rem Inter, sans-serif; cursor:pointer; white-space:nowrap; }
+  .bookf > button.on { color:var(--fg); border-color:rgba(46,92,255,.5); }
+  .bookf-pop { position:absolute; right:0; top:calc(100% + 8px); background:var(--card); border:1px solid var(--border); border-radius:12px; padding:10px; z-index:40; min-width:180px; box-shadow:0 10px 30px rgba(0,0,0,.4); }
+  .bookf-pop[hidden] { display:none; }
+  .bookf-row { display:flex; align-items:center; gap:9px; padding:6px 4px; font-size:.9rem; cursor:pointer; }
+  .bookf-row input { accent-color:var(--blue); width:16px; height:16px; }
+  .logo { width:28px; height:28px; border-radius:7px; display:grid; place-items:center; font:800 .7rem Inter, sans-serif; color:#fff; }
+  .lg-polymarket { background:var(--blue); }
+  .lg-goated { background:linear-gradient(135deg,#7c3aed,#c026d3); }
+  .lg-dexsport { background:linear-gradient(135deg,#ec4899,#f43f5e); }
+  .lg-bet105 { background:linear-gradient(135deg,#f59e0b,#ef4444); }
+  .lg-novig { background:linear-gradient(135deg,#10b981,#06b6d4); }
+  .lg-other { background:#3a3f4b; }
+  .ret { color:var(--muted); font-size:.78rem; }
+
+  /* tap-to-copy amounts + the "do this" steps under each card */
+  .copy { appearance:none; background:none; border:0; padding:0; margin:0; color:inherit; cursor:pointer; text-align:left;
+          border-bottom:1px dashed rgba(255,255,255,.35); -webkit-tap-highlight-color:transparent; }
+  .copy:active { opacity:.6; }
+  .todo { padding:12px 16px 14px; background:var(--card2); border-top:1px solid var(--border); display:grid; gap:7px; font-size:.9rem; line-height:1.45; }
+  .todo .st { display:flex; gap:10px; align-items:baseline; }
+  .todo .n { font-family:var(--mono); color:var(--muted); }
+  .todo b { color:var(--fg); }
+  .todo a { color:#7fb2ff; text-decoration:none; font-weight:600; }
+  .todo .copy { font-family:var(--mono); font-weight:700; font-size:.95rem; }
+  .todo .buy { appearance:none; border:1px solid rgba(46,92,255,.75); background:rgba(46,92,255,.2); color:#fff; border-radius:999px;
+               padding:4px 12px; margin-left:8px; font:700 .82rem Inter, sans-serif; cursor:pointer; white-space:nowrap; }
+  .todo .buy:active { background:rgba(46,92,255,.45); }
+  .toast { position:fixed; left:50%; bottom:calc(24px + env(safe-area-inset-bottom,0px)); transform:translateX(-50%); background:#1b2030;
+           border:1px solid var(--border); color:var(--fg); padding:10px 16px; border-radius:999px; font-weight:600; font-size:.9rem;
+           z-index:80; opacity:0; pointer-events:none; transition:opacity .2s; white-space:nowrap; }
+  .toast.show { opacity:1; }
+
+  /* one-tap Polymarket buy sheet */
+  .modal { position:fixed; inset:0; background:rgba(5,7,12,.8); z-index:70; display:flex; align-items:flex-end; justify-content:center; }
+  .modal[hidden] { display:none; }
+  .sheet { width:min(540px,100%); background:var(--card); border:1px solid var(--border); border-radius:18px 18px 0 0; padding:18px 18px calc(18px + env(safe-area-inset-bottom,0px)); max-height:92vh; overflow:auto; }
+  .sheet-top { display:flex; justify-content:space-between; gap:12px; align-items:flex-start; margin-bottom:12px; }
+  .sheet-title { font-weight:800; font-size:1.15rem; }
+  .sheet-sub { color:var(--muted); font-size:.85rem; margin-top:2px; }
+  .sheet .x { appearance:none; border:1px solid var(--border); background:transparent; color:var(--fg); width:34px; height:34px; border-radius:10px; cursor:pointer; font-size:1rem; }
+  .tm-inputs { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  .tm-note { color:var(--muted); font-size:.8rem; line-height:1.45; margin:10px 2px; }
+  .tm-grid { display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:10px; margin:12px 0 4px; }
+  .tm-grid > div { border:1px solid var(--border); border-radius:12px; padding:10px 12px; }
+  .tm-grid .big { font-family:var(--mono); font-size:1.3rem; font-weight:700; margin-top:2px; }
+  .tm-msg { padding:10px 12px; border-radius:10px; border:1px solid var(--border); font-size:.9rem; line-height:1.45; margin-top:10px; }
+  .tm-msg.ok { color:var(--win); border-color:rgba(34,197,94,.35); background:rgba(34,197,94,.08); }
+  .tm-msg.bad { color:#ff8a8a; border-color:rgba(239,68,68,.4); background:rgba(239,68,68,.08); }
+  .tm-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:14px; align-items:center; }
+  .tm-go { appearance:none; border:0; background:var(--blue); color:#fff; border-radius:999px; padding:13px 20px; font:800 1rem Inter, sans-serif; cursor:pointer; flex:1 1 auto; }
+  .tm-go.warn { background:#b45309; }
+  .tm-go:disabled { opacity:.5; }
+
+  .empty { text-align:center; padding:48px 20px; color:var(--muted); border:1px dashed var(--border); border-radius:16px; line-height:1.6; }
+  .empty .scope { width:58px; height:58px; margin:0 auto 14px; border-radius:50%; border:2px solid var(--scope); position:relative; animation:spin 6s linear infinite; }
+  .empty .scope::before, .empty .scope::after { content:""; position:absolute; background:var(--scope); }
+  .empty .scope::before { left:50%; top:-8px; bottom:-8px; width:2px; transform:translateX(-50%); }
+  .empty .scope::after { top:50%; left:-8px; right:-8px; height:2px; transform:translateY(-50%); }
+  .empty .closest { font-family:var(--mono); font-size:.8rem; margin-top:8px; }
+  @keyframes spin { to { rotate:360deg; } }
+  .demo { text-align:center; color:var(--open); font-family:var(--mono); font-size:.78rem; margin:-4px 0 12px; }
+  .note { color:var(--muted); font-size:.78rem; line-height:1.5; margin-top:18px; }
+
+  /* ---------- arb tracker ---------- */
+  .tr-sum { display:grid; grid-template-columns:repeat(4, minmax(0,1fr)); gap:10px; margin-bottom:14px; }
+  .trbtns { display:flex; flex-wrap:wrap; align-items:center; gap:8px; padding:12px 16px 14px; border-top:1px solid var(--border); background:var(--card2); }
+  .trbtns .lbl { margin-right:2px; }
+  .trbtn { appearance:none; border:1px solid var(--border); background:transparent; color:var(--fg); border-radius:999px; padding:7px 14px; font:600 .85rem Inter, sans-serif; cursor:pointer; }
+  .trbtn:hover { border-color:#3a3f4b; }
+  .trbtn.danger { color:var(--loss); margin-left:auto; }
+  .trnote { padding:0 16px 12px; background:var(--card2); color:var(--muted); font-size:.8rem; line-height:1.45; }
+  details.addbox { margin-top:4px; }
+  details.addbox summary { cursor:pointer; list-style:none; display:inline-flex; align-items:center; padding:9px 16px; border:1px solid var(--border); border-radius:999px; font-weight:600; font-size:.9rem; background:var(--card); }
+  details.addbox summary::-webkit-details-marker { display:none; }
+  details.addbox[open] summary { border-color:#3a3f4b; }
+  .tr-form { display:grid; gap:12px; margin-top:12px; }
+  .tr-top { display:grid; grid-template-columns:2fr 1fr 1fr; gap:10px; }
+  .tr-leg { border:1px solid var(--border); border-radius:12px; padding:12px; display:grid; grid-template-columns:repeat(4, minmax(0,1fr)); gap:10px; }
+  .tr-leg .tl { grid-column:1 / -1; font-weight:700; font-size:.9rem; }
+  .fld select { appearance:none; width:100%; background:#0b0d12; color:var(--fg); border:1px solid var(--border); border-radius:10px;
+                padding:11px 12px; font-family:Inter, sans-serif; font-size:1rem; outline:none; }
+  .fld select:focus { border-color:#3a3f4b; box-shadow:0 0 0 3px rgba(46,92,255,.18); }
+  .tr-msg { color:var(--muted); font-size:.85rem; min-height:1.2em; }
+  .tr-go { appearance:none; border:0; background:var(--blue); color:#fff; border-radius:999px; padding:12px 18px; font:700 .95rem Inter, sans-serif; cursor:pointer; justify-self:start; }
+
+  /* ---------- manual arbitrage calculator (moved from the public site) ---------- */
+  .win { color:var(--win); } .loss { color:var(--loss); }
+  .lbl { color:var(--muted); font-size:.78rem; letter-spacing:.06em; }
+  .box { background:var(--card); border:1px solid var(--border); border-radius:14px; padding:16px 18px; }
+  .sec-title { font-size:1.25rem; font-weight:700; margin:34px 0 10px; }
+  .arb-grid { display:grid; grid-template-columns:repeat(3, minmax(0,1fr)); gap:12px; }
+  .fld { display:flex; flex-direction:column; gap:6px; }
+  .fld input { appearance:none; width:100%; background:#0b0d12; color:var(--fg); border:1px solid var(--border); border-radius:10px;
+               padding:11px 12px; font-family:var(--mono); font-size:1.05rem; outline:none; }
+  .fld input:focus { border-color:#3a3f4b; box-shadow:0 0 0 3px rgba(46,92,255,.18); }
+  .chk { display:inline-flex; align-items:center; gap:8px; color:var(--muted); font-size:.85rem; margin-top:12px; cursor:pointer; }
+  .chk input { accent-color: var(--blue); width:16px; height:16px; }
+  .verdict { margin-top:14px; padding:10px 12px; border-radius:10px; border:1px solid var(--border); font-weight:700; font-size:.95rem; }
+  .verdict.good { color:var(--win); border-color:rgba(34,197,94,.35); background:rgba(34,197,94,.08); }
+  .verdict.bad { color:var(--loss); border-color:rgba(239,68,68,.38); background:rgba(239,68,68,.08); }
+  .arb-out { display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:10px; margin-top:12px; }
+  .ocard { border:1px solid var(--border); border-radius:12px; padding:12px 14px; }
+  .ocard .big { font-family:var(--mono); font-size:1.35rem; margin-top:2px; }
+  .ocard .small { color:var(--muted); font-size:.8rem; margin-top:4px; }
+  .anote { color:var(--muted); font-size:.8rem; margin:10px 2px 0; line-height:1.45; }
+  @media (max-width:560px) { .arb-grid { grid-template-columns:1fr; } .arb-out { grid-template-columns:1fr; }
+    .tr-sum { grid-template-columns:repeat(2, minmax(0,1fr)); } .tr-top { grid-template-columns:1fr; } .tr-leg { grid-template-columns:repeat(2, minmax(0,1fr)); } }
+
+  @media (max-width:420px) { .pct b { font-size:1.7rem; } .stake { font-size:1.15rem; } .odds { font-size:.95rem; } .leg { padding:12px; } }
+  @media (prefers-reduced-motion:reduce) { .sniper i, .pulse::before, .empty .scope, .card { animation:none; } }
+
+  /* ---------- screenshot tab ---------- */
+  .scan-box { background:var(--card); border:1px solid var(--border); border-radius:16px; padding:18px; }
+  .scan-title { font-weight:800; font-size:1.15rem; }
+  .scan-sub { color:var(--muted); font-size:.85rem; line-height:1.5; margin:6px 0 14px; }
+  .scan-drop { display:flex; align-items:center; justify-content:center; border:2px dashed var(--border); border-radius:14px; padding:26px 12px; cursor:pointer; font-weight:700; background:rgba(255,255,255,.02); }
+  .scan-drop:active { background:rgba(46,92,255,.12); }
+  .scan-thumbs { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
+  .scan-thumbs img { width:72px; height:72px; object-fit:cover; border-radius:10px; border:1px solid var(--border); }
+  .scan-actions { display:flex; gap:8px; align-items:center; margin-top:14px; }
+  .scan-actions .tr-go:disabled { opacity:.45; }
+  .sc-card { background:var(--card); border:1px solid var(--border); border-radius:16px; margin-top:14px; overflow:hidden; }
+  .sc-head { padding:14px 16px; display:grid; gap:8px; }
+  .sc-grid { display:grid; grid-template-columns:1fr 1fr; border-top:1px solid var(--border); background:var(--card2); }
+  .sc-leg { padding:12px 14px; display:grid; gap:8px; min-width:0; }
+  .sc-leg + .sc-leg { border-left:1px solid var(--border); }
+  .sc-leg input, .sc-leg select, .sc-head input { width:100%; background:#0b0d12; color:var(--fg); border:1px solid var(--border); border-radius:10px; padding:10px; font:500 .95rem var(--mono); outline:none; }
+  .sc-sum { padding:12px 16px; border-top:1px solid var(--border); display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap; font-size:.88rem; }
+  .sc-warn { color:var(--open); font-size:.82rem; line-height:1.4; }
+</style></head>
+<body><div class="wrap">
+  <header>
+    <div>
+      <div class="brand">
+        <img src="/logo.png" alt="VeSTAX" onerror="this.style.display='none'"/>
+        <h1>VeSTAX <span class="sniper"><i class="tl"></i><i class="tr"></i><i class="bl"></i><i class="br"></i>ARBS</span></h1>
+      </div>
+      <div class="sub">Polymarket.us · Goated · Bet105 · All sports</div>
+    </div>
+    <span class="pulse" id="pulse">connecting</span>
+  </header>
+  <div class="controls">
+    <div class="seg">
+      <button id="tPre" class="on">Pre-Match<span class="n" id="nPre">0</span></button>
+      <button id="tLive">Live<span class="n" id="nLive">0</span></button>
+      <button id="tScan">📷 Scan</button>
+    </div>
+    <div class="ctl-right">
+      <button class="snd" id="snd" type="button">🔕 Sound off</button>
+      <button class="snd autobet" id="autobet" type="button">🤖 Auto Bettor: ON</button>
+      <button class="snd autobet" id="vxauto" type="button">⚡ Server auto-fire: ...</button>
+      <div class="bookf"><button type="button" id="bookfBtn">📚 Books</button><div class="bookf-pop" id="bookfPop" hidden></div></div>
+      <label class="bank"><span>BANKROLL $</span><input id="bank" type="number" inputmode="decimal" min="1" step="1" value="25"/></label>
+      <label class="bank ceiling"><span>CEILING</span>
+        <select id="ceilBook"><option value="">Off</option><option value="bovada">Bovada</option><option value="goated">Goated</option><option value="polymarket">Polymarket</option><option value="bet105">Bet105</option></select>
+        <input id="ceilAmt" type="number" inputmode="decimal" min="1" step="1" placeholder="$ max"/>
+      </label>
+    </div>
+  </div>
+  <div class="demo" id="demo" hidden>SAMPLE DATA · not real opportunities</div>
+  <div id="list"></div>
+  <div id="scanPane" hidden>
+    <div class="scan-box">
+      <div class="scan-title">Add bets from screenshots</div>
+      <div class="scan-sub">Upload your Polymarket "You bought" screens and your Goated bet slip or My Bets screens. It reads them, pairs the two sides, and builds cards for you to check before adding them to the tracker.</div>
+      <label class="scan-drop"><input type="file" id="scanFiles" accept="image/*" multiple hidden /><span>📷 Tap to choose screenshots</span></label>
+      <div class="scan-thumbs" id="scanThumbs"></div>
+      <div class="scan-actions"><button type="button" class="tr-go" id="scanGo" disabled>Read screenshots</button><button type="button" class="trbtn" id="scanClear">Clear</button></div>
+      <div class="tr-msg" id="scanMsg"></div>
+    </div>
+    <div id="scanResults"></div>
+  </div>
+  <p class="note">Tap a site's logo to open that game, and tap any dollar amount to copy it. Place the Goated bet first, then tap ⚡ Buy on the card to buy the Polymarket side. Turn Sound on and keep this page open to hear a beep when a new live arb appears. Stakes are whole dollars chosen so you still win whichever side wins. Polymarket prices include the taker fee. Odds move fast, so confirm both sides are the same match and market.</p>
+
+  <h2 class="sec-title">Arb Tracker</h2>
+  <div class="tr-sum">
+    <div class="ocard"><span class="lbl">LOCKED IN (OPEN)</span><div class="big" id="trLocked">$0.00</div><div class="small" id="trOpenN">0 open</div></div>
+    <div class="ocard"><span class="lbl">REALIZED PROFIT</span><div class="big" id="trRealized">$0.00</div><div class="small" id="trDoneN">0 settled</div></div>
+    <div class="ocard"><span class="lbl">RETURN (SETTLED)</span><div class="big" id="trRoi">-</div><div class="small">profit / money used</div></div>
+    <div class="ocard"><span class="lbl">MONEY IN OPEN ARBS</span><div class="big" id="trIn">$0.00</div><div class="small">both sides combined</div></div>
+  </div>
+  <div id="trList"></div>
+  <details class="addbox">
+    <summary>＋ Add an arb</summary>
+    <div class="tr-form">
+      <div class="tr-top">
+        <label class="fld"><span class="lbl">MATCH</span><input id="tEvent" type="text" placeholder="Bhutan vs Qatar" /></label>
+        <label class="fld"><span class="lbl">SPORT</span><input id="tSport" type="text" placeholder="Cricket" /></label>
+        <label class="fld"><span class="lbl">LEAGUE (OPTIONAL)</span><input id="tLeague" type="text" placeholder="" /></label>
+      </div>
+      <div class="tr-leg">
+        <div class="tl">Bet 1</div>
+        <label class="fld"><span class="lbl">SITE</span><select id="tABook"><option value="polymarket">Polymarket</option><option value="goated">Goated</option><option value="bet105">Bet105</option><option value="novig">Novig</option><option value="dexsport">Dexsport</option><option value="other">Other</option></select></label>
+        <label class="fld"><span class="lbl">PICK</span><input id="tAPick" type="text" placeholder="Qatar" /></label>
+        <label class="fld"><span class="lbl">STAKE ($)</span><input id="tAStake" type="number" inputmode="decimal" step="0.01" min="0" /></label>
+        <label class="fld"><span class="lbl">PAYS IF IT WINS ($)</span><input id="tAPay" type="number" inputmode="decimal" step="0.01" min="0" /></label>
+      </div>
+      <div class="tr-leg">
+        <div class="tl">Bet 2</div>
+        <label class="fld"><span class="lbl">SITE</span><select id="tBBook"><option value="goated">Goated</option><option value="polymarket">Polymarket</option><option value="bet105">Bet105</option><option value="novig">Novig</option><option value="dexsport">Dexsport</option><option value="other">Other</option></select></label>
+        <label class="fld"><span class="lbl">PICK</span><input id="tBPick" type="text" placeholder="Bhutan" /></label>
+        <label class="fld"><span class="lbl">STAKE ($)</span><input id="tBStake" type="number" inputmode="decimal" step="0.01" min="0" /></label>
+        <label class="fld"><span class="lbl">PAYS IF IT WINS ($)</span><input id="tBPay" type="number" inputmode="decimal" step="0.01" min="0" /></label>
+      </div>
+      <label class="fld"><span class="lbl">NOTE (OPTIONAL)</span><input id="tNote" type="text" placeholder="" /></label>
+      <button class="tr-go" id="trAdd" type="button">Add to tracker</button>
+      <div class="tr-msg" id="trMsg"></div>
+    </div>
+  </details>
+
+  <h2 class="sec-title">Arbitrage Calculator</h2>
+  <section class="box">
+    <div class="arb-grid">
+      <label class="fld"><span class="lbl">POLYMARKET PRICE (¢) · SIDE A</span>
+        <input id="aPm" type="number" inputmode="decimal" min="1" max="99" step="0.1" value="45" /></label>
+      <label class="fld"><span class="lbl">OTHER SITE ODDS (DECIMAL) · SIDE B</span>
+        <input id="aOdds" type="number" inputmode="decimal" min="1.01" step="0.01" value="2.20" /></label>
+      <label class="fld"><span class="lbl">TOTAL TO INVEST ($)</span>
+        <input id="aTotal" type="number" inputmode="decimal" min="1" step="1" value="100" /></label>
+    </div>
+    <label class="chk"><input id="aFee" type="checkbox" checked /> Include Polymarket taker fee</label>
+    <div id="aVerdict" class="verdict">—</div>
+    <div class="arb-out">
+      <div class="ocard"><span class="lbl">POLYMARKET (SIDE A)</span><div class="big" id="aPmStake">$0.00</div><div class="small" id="aPmInfo">—</div></div>
+      <div class="ocard"><span class="lbl">OTHER SITE (SIDE B)</span><div class="big" id="aOtherStake">$0.00</div><div class="small" id="aOtherInfo">—</div></div>
+      <div class="ocard"><span class="lbl">PAYOUT EITHER WAY</span><div class="big" id="aPayout">$0.00</div><div class="small">what you get back whichever side wins</div></div>
+      <div class="ocard"><span class="lbl">GUARANTEED PROFIT</span><div class="big" id="aProfit">$0.00</div><div class="small" id="aRoi">—</div></div>
+    </div>
+    <p class="anote" id="aNote"></p>
+  </section>
+</div>
+
+<div class="modal" id="tm" hidden>
+  <div class="sheet">
+    <div class="sheet-top">
+      <div><div class="sheet-title" id="tmTitle">Buy on Polymarket</div><div class="sheet-sub" id="tmSub"></div></div>
+      <button type="button" class="x" data-tm="close" aria-label="Close">✕</button>
+    </div>
+    <div class="tm-inputs">
+      <label class="fld"><span class="lbl">OTHER BOOK STAKE ($)</span><input id="tmGStake" type="number" inputmode="decimal" step="0.01" /></label>
+      <label class="fld"><span class="lbl">OTHER BOOK PAYOUT ($)</span><input id="tmGPay" type="number" inputmode="decimal" step="0.01" /></label>
+      <label class="fld" style="grid-column:1 / -1"><span class="lbl">POLYMARKET SPEND ($) · whole dollars; leave blank to match the Goated payout</span><input id="tmPSpend" type="number" inputmode="decimal" step="1" /></label>
+      <label class="fld" style="grid-column:1 / -1; display:flex; align-items:center; gap:8px; flex-direction:row"><input id="tmAdditional" type="checkbox" style="width:auto" /><span>This is an additional, separate stake (the sportsbook double-placed it) -- hedge it fresh, don't subtract anything already bought on this arb</span></label>
+    </div>
+    <div class="tm-note">Prefilled from the card. If your Goated bet slip shows different numbers, type those ("Your Stake" and "Est. Payout"). Polymarket then buys that many shares so both sides pay the same.</div>
+    <div id="tmBody"></div>
+    <div class="tm-actions" id="tmActions"></div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+<div id="vxres" hidden></div>
+<script>
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[c]));
+  const BOOK = { polymarket:["PM","Polymarket.us"], goated:["GT","Goated"], dexsport:["DX","Dexsport"], bet105:["B1","Bet105"], bovada:["BV","Bovada"], novig:["NV","Novig"] };
+  const ICON = (s) => { s = String(s || "").toLowerCase();
+    return s.includes("table") ? "🏓" : s.includes("tennis") ? "🎾" : s.includes("basket") ? "🏀" : s.includes("baseball") ? "⚾" :
+      s.includes("hockey") ? "🏒" : s.includes("american") ? "🏈" : s.includes("mma") || s.includes("box") ? "🥊" :
+      s.includes("volley") ? "🏐" : s.includes("dart") ? "🎯" : s.includes("cricket") ? "🏏" : s.includes("rugby") ? "🏉" :
+      /counter|cs2|dota|league of|valorant|esport|call of|overwatch|rainbow/.test(s) ? "🎮" : "🏟️"; };
+  const amer = (d) => d >= 2 ? "+" + Math.round((d - 1) * 100) : "-" + Math.round(100 / (d - 1));
+  const usd = (x) => "$" + (x >= 1000 ? (x / 1000).toFixed(1) + "k" : (x >= 100 || Number.isInteger(x)) ? x.toFixed(0) : x.toFixed(2));
+  const money = (x) => (x >= 0 ? "+" : "-") + "$" + Math.abs(x).toFixed(2);
+  const dollars = (x) => "$" + Math.abs(x).toFixed(2);
+  const color = (el, x) => { el.classList.remove("win","loss"); el.classList.add(x >= 0 ? "win" : "loss"); };
+  const when = (t) => {
+    if (!t) return "";
+    const d = new Date(t), now = new Date();
+    const day = (x) => x.toLocaleDateString("en-US", { timeZone:"America/Los_Angeles" });
+    const tm = d.toLocaleTimeString("en-US", { timeZone:"America/Los_Angeles", hour:"numeric", minute:"2-digit" });
+    const tmrw = new Date(now.getTime() + 864e5);
+    return (day(d) === day(now) ? "Today, " : day(d) === day(tmrw) ? "Tmrw, " : d.toLocaleDateString("en-US", { timeZone:"America/Los_Angeles", month:"short", day:"numeric" }) + ", ") + tm;
+  };
+
+  // ---------- tap-to-copy ----------
+  const copyText = async (txt) => {
+    try { await navigator.clipboard.writeText(txt); return true; } catch (e) { /* fall back below */ }
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = txt; ta.style.position = "fixed"; ta.style.opacity = "0";
+      document.body.appendChild(ta); ta.select();
+      const ok = document.execCommand("copy");
+      document.body.removeChild(ta);
+      return ok;
+    } catch (e) { return false; }
+  };
+  let toastT;
+  const toast = (msg) => { const t = $("toast"); t.textContent = msg; t.classList.add("show"); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove("show"), 1700); };
+  document.addEventListener("click", async (e) => {
+    const c = e.target.closest("[data-copy]");
+    if (!c) return;
+    e.preventDefault();
+    const v = c.getAttribute("data-copy");
+    toast((await copyText(v)) ? "Copied " + v : "Couldn't copy - long-press the number");
+  });
+
+  // ---------- optional beep when a NEW live arb appears (keep this page open) ----------
+  let soundOn = false;
+  try { soundOn = localStorage.getItem("vxsound") === "1"; } catch (e) { /* no storage */ }
+  // master switch for the auto-trigger specifically -- the scanner, matching, counts and manual
+  // one-tap buying all keep working exactly as normal either way; this only gates the background
+  // autoTryGoatedPair loop so it's safe to watch the feed without anything firing on its own.
+  // Defaults to ON (unchanged from existing behavior) unless explicitly turned off before.
+  let autoBetOn = true;
+  try { const v = localStorage.getItem("vxautobet"); autoBetOn = v === null ? true : v === "1"; } catch (e) { autoBetOn = true; }
+  const paintAutobet = () => {
+    const b = $("autobet");
+    b.textContent = autoBetOn ? "🤖 Auto Bettor: ON" : "🤖 Auto Bettor: OFF";
+    b.classList.toggle("on", autoBetOn);
+    b.classList.toggle("off", !autoBetOn);
+  };
+  $("autobet").onclick = () => {
+    autoBetOn = !autoBetOn;
+    try { localStorage.setItem("vxautobet", autoBetOn ? "1" : "0"); } catch (e) { /* ignore */ }
+    paintAutobet();
+  };
+  paintAutobet();
+
+  // ---------- server-side buy: tap the Goated badge on a Goated-vs-Polymarket card and BOTH legs are bought from the server ----------
+  const vxRes = $("vxres");
+  let vxResT;
+  function vxShow(title, text, hideMs) {
+    vxRes.hidden = false;
+    vxRes.innerHTML = '<button type="button" class="x" id="vxresx">\u00d7</button><b>' + esc(title) + '</b>' + esc(text);
+    clearTimeout(vxResT);
+    if (hideMs) vxResT = setTimeout(() => { vxRes.hidden = true; }, hideMs);
+  }
+  document.addEventListener("click", (e) => { if (e.target && e.target.id === "vxresx") vxRes.hidden = true; });
+  const vxBuyBusy = {};
+  document.addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-vxbuy]");
+    if (!b) return;
+    e.preventDefault();
+    const id = Number(b.getAttribute("data-vxbuy"));
+    if (!id || vxBuyBusy[id]) return;
+    vxBuyBusy[id] = true; b.disabled = true;
+    const r0 = rows.find((x) => x.id === id);
+    const match = r0 ? r0.player_a + " vs " + r0.player_b : "this arb";
+    vxShow("Buying...", match + "\nGoated first, then Polymarket. Please wait.", 0);
+    try {
+      const bank = Math.max(2, Math.round(Number($("bank").value) || 5));
+      const resp = await fetch("/api/tracker/arb-buy", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: id, bankroll: bank, dry: false }) });
+      const j = await resp.json().catch(() => ({}));
+      if (j.error) { vxShow("Not bought", match + "\n" + j.error, 20000); }
+      else {
+        const p = j.plan || {}, g = j.goated || {}, m = j.polymarket || {};
+        const lines = match + "\nGoated $" + (p.goated ? p.goated.stake : "?") + " @ " + (p.goated ? p.goated.odds : "?") + ": " + (g.ok ? "placed" : "NOT placed (" + g.error + ")") +
+          "\nPolymarket $" + (p.polymarket ? p.polymarket.cash : "?") + ": " + (m.done ? "bought" : (m.filledShares > 0 ? "PARTIAL " + Number(m.filledShares).toFixed(2) + " sh" : "not bought")) + (m.error ? " (" + m.error + ")" : "") + (j.tracked ? "\nLogged to the tracker." : "");
+        if (g.ok && m.done) vxShow("Both legs placed", lines, 25000);
+        else if (!g.ok && !(m.filledShares > 0)) vxShow("Nothing was bought", lines, 25000);
+        else vxShow("CHECK YOUR POSITIONS", lines, 0);
+      }
+    } catch (err) { vxShow("Network error", String(err && err.message || err) + "\nCheck Goated and Polymarket before trying again.", 0); }
+    vxBuyBusy[id] = false;
+    load();
+  });
+
+  // ---------- server auto-fire switch (it runs on the server, so it works with this page closed) ----------
+  let vxAutoOn = false;
+  function vxPaintAuto(d) {
+    vxAutoOn = !!(d && d.on);
+    const b = $("vxauto");
+    b.textContent = d ? "\u26a1 Server auto-fire: " + (vxAutoOn ? "ON" : "OFF") : "\u26a1 Server auto-fire: ?";
+    b.classList.toggle("on", vxAutoOn);
+    b.classList.toggle("off", !!d && !vxAutoOn);
+    b.title = d ? "Fires at " + d.minPct + "%+ on Goated vs Polymarket, $" + d.bankroll + " per buy, " + (d.todayCount == null ? "?" : d.todayCount) + " done in the last 24h" : "";
+  }
+  async function vxLoadAuto() { try { vxPaintAuto(await (await fetch("/api/auto", { cache: "no-store" })).json()); } catch (e) { vxPaintAuto(null); } }
+  $("vxauto").onclick = async () => {
+    try {
+      const r = await fetch("/api/tracker/auto", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ on: !vxAutoOn }) });
+      vxPaintAuto(await r.json());
+    } catch (e) { toast("Could not reach the server"); }
+  };
+  vxLoadAuto(); setInterval(vxLoadAuto, 20000);
+  let audioCtx = null;
+  const beep = () => {
+    try {
+      audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+      if (audioCtx.state === "suspended") audioCtx.resume();
+      const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+      o.type = "sine"; o.frequency.value = 880; g.gain.value = 0.2;
+      o.connect(g); g.connect(audioCtx.destination);
+      o.start(); o.stop(audioCtx.currentTime + 0.22);
+    } catch (e) { /* audio not available */ }
+  };
+  const paintSound = () => { $("snd").textContent = soundOn ? "🔔 Sound on" : "🔕 Sound off"; $("snd").classList.toggle("on", soundOn); };
+  $("snd").onclick = () => {
+    soundOn = !soundOn;
+    try { localStorage.setItem("vxsound", soundOn ? "1" : "0"); } catch (e) { /* ignore */ }
+    paintSound();
+    if (soundOn) beep();
+  };
+  paintSound();
+  const FILTER_BOOKS = [["polymarket","Polymarket"],["goated","Goated"],["bet105","Bet105"],["bovada","Bovada"],["gemini","Gemini"]];
+  let hiddenBooks = new Set();
+  try { hiddenBooks = new Set(JSON.parse(localStorage.getItem("vxhidebooks") || "[]")); } catch (e) { hiddenBooks = new Set(); }
+  function paintBookf() {
+    $("bookfPop").innerHTML = FILTER_BOOKS.map(([k, label]) =>
+      '<label class="bookf-row"><input type="checkbox" data-bk="' + k + '"' + (hiddenBooks.has(k) ? "" : " checked") + '/>' + esc(label) + '</label>'
+    ).join("");
+    $("bookfBtn").classList.toggle("on", hiddenBooks.size > 0);
+  }
+  paintBookf();
+  $("bookfBtn").onclick = (e) => { e.stopPropagation(); $("bookfPop").hidden = !$("bookfPop").hidden; };
+  $("bookfPop").addEventListener("change", (e) => {
+    const cb = e.target.closest("input[data-bk]");
+    if (!cb) return;
+    const bk = cb.getAttribute("data-bk");
+    if (cb.checked) hiddenBooks.delete(bk); else hiddenBooks.add(bk);
+    try { localStorage.setItem("vxhidebooks", JSON.stringify([...hiddenBooks])); } catch (e2) { /* no storage */ }
+    paintBookf();
+    render();
+  });
+  document.addEventListener("click", (e) => { if (!e.target.closest(".bookf")) $("bookfPop").hidden = true; });
+  let seenLive = null;
+
+  const DEMO = new URLSearchParams(location.search).has("demo");
+  const SAMPLE = [
+    { id:1, sport:"Basketball", league:"NBA", market:"Moneyline", player_a:"Celtics", player_b:"Knicks", start_time:new Date(Date.now()+36e5).toISOString(), is_live:false,
+      book_a:"polymarket", odds_a:1.62, liq_a:2600, book_b:"goated", odds_b:2.72, liq_b:null, profit_pct:1.6, first_seen:new Date().toISOString(), url_a:"https://polymarket.us", url_b:"https://www.goated.com/sports" },
+    { id:2, sport:"Table Tennis", league:"Czech Liga Pro", market:"Moneyline", player_a:"Josef Hanacek", player_b:"Tomas Hanke", start_time:new Date().toISOString(), is_live:true,
+      book_a:"goated", odds_a:2.08, liq_a:null, book_b:"polymarket", odds_b:2.01, liq_b:925, profit_pct:1.3, first_seen:new Date(Date.now()-9e4).toISOString(), url_a:"https://www.goated.com/sports", url_b:"https://polymarket.us" },
+  ];
+  let rows = [], status = null, tab = "pre", tradeOn = false;
+  // ---------- manual per-card stake override, for a bet you're placing by hand with a different
+  // amount than what's shown (e.g. you already have $35 sitting in that book, not the suggested
+  // $25) -- entirely separate from the bankroll box and the auto-trigger, which both compute their
+  // own numbers independently and never read this ----------
+  let manualStake = {}; // { [rowId]: { a: number, b: number } }
+  let editingId = null;
+  // "Ceiling": persisted per-book manual cap, read by pairStakes() above. "Off" (empty select value)
+  // or no amount typed both mean inactive -- every card then just uses the bankroll box as before.
+  let ceilingBook = "", ceilingAmt = 0;
+  try { ceilingBook = localStorage.getItem("vxceilbook") || ""; } catch (e) { ceilingBook = ""; }
+  try { ceilingAmt = Number(localStorage.getItem("vxceilamt")) || 0; } catch (e) { ceilingAmt = 0; }
+  if ($("ceilBook")) {
+    $("ceilBook").value = ceilingBook;
+    $("ceilAmt").value = ceilingAmt > 0 ? ceilingAmt : "";
+    $("ceilBook").onchange = () => {
+      ceilingBook = $("ceilBook").value;
+      try { localStorage.setItem("vxceilbook", ceilingBook); } catch (e) { /* ignore */ }
+      render();
+    };
+    $("ceilAmt").oninput = () => {
+      ceilingAmt = Number($("ceilAmt").value) || 0;
+      try { localStorage.setItem("vxceilamt", String(ceilingAmt)); } catch (e) { /* ignore */ }
+      render();
+    };
+  }
+  function pairStakes(r, bank) {
+    const ov = manualStake[r.id];
+    if (ov) return [ov.a, ov.b];
+    // "Ceiling": a per-book manual cap, for looking at prices and sizing a manual bet when you
+    // know exactly how much you have free on one specific book right now -- not a bankroll, a hard
+    // cap on whichever side is that book. Only kicks in for a card where the selected book is
+    // actually one of the two sides; every other card keeps using the bankroll box as normal. The
+    // fully automatic trigger never reads this at all (it sizes itself independently); a manual
+    // click picks up whatever's shown here, same as it already does for a per-card ✎ edit.
+    if (ceilingBook && ceilingAmt > 0) {
+      if (r.book_a === ceilingBook) return [ceilingAmt, ceilingAmt * r.odds_a / r.odds_b];
+      if (r.book_b === ceilingBook) return [ceilingAmt * r.odds_b / r.odds_a, ceilingAmt];
+    }
+    const ia = 1 / r.odds_a, ib = 1 / r.odds_b, sum = ia + ib;
+    let sa = bank * ia / sum, sb = bank * ib / sum;
+    const w = wholePair(bank, r.odds_a, r.odds_b);
+    if (w) { sa = w[0]; sb = w[1]; }
+    return [sa, sb];
+  }
+  function legEditPair(r, sa, sb) {
+    const mk = (side, name, book, odds, liq, stake) => {
+      const [abbr, label] = BOOK[book] ?? [book.slice(0,2).toUpperCase(), book];
+      const pm = book === "polymarket";
+      return '<div class="leg"><div class="who">' + esc(name) + '</div><div class="row"><div>' +
+        '<input class="stakein" type="number" step="0.01" min="0" inputmode="decimal" value="' + stake.toFixed(2) + '" data-row="' + r.id + '" data-side="' + side + '" data-oa="' + r.odds_a + '" data-ob="' + r.odds_b + '"/>' +
+        '<div class="meta">' + (pm ? '<span class="c">' + Math.round(100 / odds) + '¢</span>' + (liq ? ' · Liq ' + usd(liq) : '') : esc(label) + ' · ' + odds.toFixed(2)) + '</div>' +
+        '<div class="ret">returns ' + usd(stake * odds) + '</div></div>' +
+        '<span class="logo lg-' + esc(book) + '">' + (BOOK[book] ? BOOK[book][0] : book.slice(0,2).toUpperCase()) + '</span></div></div>';
+    };
+    return mk("a", r.player_a, r.book_a, r.odds_a, r.liq_a, sa) + mk("b", r.player_b, r.book_b, r.odds_b, r.liq_b, sb) +
+      '<div class="editbar"><button type="button" class="trbtn" data-editdone="' + r.id + '">✓ Done</button><button type="button" class="trbtn" data-editreset="' + r.id + '">↺ Reset to auto</button></div>';
+  }
+  document.addEventListener("input", (e) => {
+    const inp = e.target.closest(".stakein");
+    if (!inp) return;
+    const id = Number(inp.getAttribute("data-row")), side = inp.getAttribute("data-side");
+    const oa = Number(inp.getAttribute("data-oa")), ob = Number(inp.getAttribute("data-ob"));
+    const v = Number(inp.value);
+    if (!(v > 0) || !(oa > 1) || !(ob > 1)) return;
+    const otherSide = side === "a" ? "b" : "a";
+    const otherVal = side === "a" ? (v * oa) / ob : (v * ob) / oa;
+    const otherInp = document.querySelector('.stakein[data-row="' + id + '"][data-side="' + otherSide + '"]');
+    if (otherInp) otherInp.value = otherVal.toFixed(2);
+    manualStake[id] = side === "a" ? { a: v, b: otherVal } : { a: otherVal, b: v };
+  });
+  document.addEventListener("click", (e) => {
+    const openB = e.target.closest("[data-editopen]");
+    if (openB) { editingId = Number(openB.getAttribute("data-editopen")); render(); return; }
+    const doneB = e.target.closest("[data-editdone]");
+    if (doneB) { editingId = null; render(); return; }
+    const resetB = e.target.closest("[data-editreset]");
+    if (resetB) { delete manualStake[Number(resetB.getAttribute("data-editreset"))]; editingId = null; render(); return; }
+  });
+  // the site badge (logo + odds) is a link straight to the game on that site; the stake is tap-to-copy
+  function leg(name, book, odds, liq, stake, url, pmPairId, plainUrl) {
+    const [abbr, label] = BOOK[book] ?? [book.slice(0,2).toUpperCase(), book];
+    const pm = book === "polymarket";
+    const inner = '<span class="logo lg-' + esc(book) + '">' + abbr + '</span>' + amer(odds) + (url ? '<span class="go">↗</span>' : '');
+    // marks the Goated side of a Goated+Polymarket card so a manual click can also fire the Polymarket
+    // leg immediately, the same way the auto-trigger does -- see the click handler below
+    const pmAttr = (book === "goated" && pmPairId) ? ' data-goated-pm="' + pmPairId + '"' : "";
+    const badge = url && /^https:[/][/]/.test(url)
+      ? '<a class="odds" href="' + esc(url) + '" target="_blank" rel="noopener noreferrer" title="Open this game on ' + esc(label) + '"' + pmAttr + '>' + inner + '</a>'
+      : '<span class="odds" title="' + esc(label) + '">' + inner + '</span>';
+    // Goated-vs-Polymarket card: tapping the Goated badge buys BOTH legs from the server (Goated first, then Polymarket), no window opens
+    const buyBadge = (book === "goated" && pmPairId)
+      ? '<button type="button" class="odds vxbuy" data-vxbuy="' + pmPairId + '" title="Buy BOTH sides now: Goated first, then Polymarket. Nothing opens.">' +
+        '<span class="logo lg-' + esc(book) + '">' + abbr + '</span>' + amer(odds) + '<span class="go">⚡</span></button>'
+      : null;
+    // a plain, inert link -- the raw site URL with no #vx=... job payload and no data-goated-pm
+    // attribute, so it can never trigger the userscript's auto-bet or the capture-phase auto-buy
+    // click handler. For just checking whether the odds have moved, with zero risk of it acting
+    // on anything.
+    const peek = plainUrl && /^https:[/][/]/.test(plainUrl)
+      ? '<a class="peek" href="' + esc(plainUrl) + '" target="_blank" rel="noopener noreferrer" title="Just look -- opens the game, buys nothing">👁</a>'
+      : "";
+    return '<div class="leg"><div class="who">' + esc(name) + '</div><div class="row"><div>' +
+      '<button type="button" class="stake copy" data-copy="' + (Number.isInteger(stake) ? stake : stake.toFixed(2)) + '" title="Tap to copy this amount">' + usd(stake) + '</button>' +
+      '<div class="meta">' + (pm ? '<span class="c">' + Math.round(100 / odds) + '¢</span>' + (liq ? ' · Liq ' + usd(liq) : '') : esc(label) + ' · ' + odds.toFixed(2)) + '</div>' +
+      '<div class="ret">returns ' + usd(stake * odds) + '</div></div>' + (buyBadge || badge) + peek + '</div></div>';
+  }
+  // plain-English steps under the card: sportsbook leg first, then Polymarket (with the one-tap Buy button)
+  function todo(r, sa, sb) {
+    const isTotal = /^Total/i.test(String(r.market || "")), isSpread = /^Spread/i.test(String(r.market || ""));
+    const steps = [
+      { book: r.book_a, name: r.player_a, stake: sa, url: gj(r, "a", sa, sb) },
+      { book: r.book_b, name: r.player_b, stake: sb, url: gj(r, "b", sb, sa) },
+    ];
+    steps.sort((x, y) => (x.book === "polymarket" ? 1 : 0) - (y.book === "polymarket" ? 1 : 0));
+    return '<div class="todo">' + steps.map((s, i) => {
+      const label = (BOOK[s.book] || [0, s.book])[1];
+      const site = s.url && /^https:[/][/]/.test(s.url)
+        ? '<a href="' + esc(s.url) + '" target="_blank" rel="noopener noreferrer">' + esc(label) + '</a>' : esc(label);
+      const buy = (s.book === "polymarket" && tradeOn && r.id)
+        ? '<button type="button" class="buy" data-buy="' + r.id + '">⚡ Buy</button>' : "";
+      return '<div class="st"><span class="n">' + (i + 1) + '</span><span>Open ' + site + ', tap <b>' + esc(s.name) + '</b>' +
+        (isTotal ? ' (in the Totals section)' : isSpread ? ' (in the Spreads section)' : '') + ', enter <button type="button" class="copy" data-copy="' + (Number.isInteger(s.stake) ? s.stake : s.stake.toFixed(2)) + '" title="Tap to copy">' + (Number.isInteger(s.stake) ? "$" + s.stake : dollars(s.stake)) + '</button>' + buy + '</span></div>';
+    }).join("") + '</div>';
+  }
+  const ageText = (t) => { const s = Math.max(0, Math.round((Date.now() - Date.parse(t)) / 1000)); return s < 90 ? "up " + s + "s" : "up " + Math.round(s / 60) + "m"; };
+  // auto-chain: for a Goated-vs-Bovada OR Goated-vs-Polymarket arb over 5%, where neither leg has filled
+  // yet, simulate a click on the Goated leg's own link -- this reuses the exact same click handler as a
+  // manual click, so it behaves identically (dual-window chaining to Bovada, or the existing auto-open +
+  // auto-buy of the Polymarket Buy sheet once Goated reports placed), just started by the page instead of you.
+  const autoClicked = new Set();
+  const autoClickedEvents = new Set();
+  const AUTO_BANKROLL = 10; // fixed -- independent of the bankroll box on screen (which it now also defaults/syncs)
+  const AUTO_MIN_PCT = 4; // raised back up now that consistency is confirmed working
+  // strip a trailing spread/total number ("Team A +3.5" -> "Team A") so the same real matchup is
+  // recognized as one event even when it shows up as separate moneyline/spread/total arb rows
+  const normTeam = (s) => String(s || "").replace(/\s*[+-]?\d+(\.\d+)?$/, "").trim().toLowerCase();
+  function autoTryGoatedPair(r) {
+    if (!autoBetOn) return;
+    if (!(r.profit_pct > AUTO_MIN_PCT)) return;
+    // individual-athlete sports where a mid-event retirement, walkover, or no-show can resolve very
+    // differently across books (confirmed tonight for tennis and boxing specifically: Polymarket
+    // settles a retirement to a clean win for the opponent, or a no-show to 50-50, while a sportsbook
+    // can simply void the bet instead) -- there's no way to detect that mismatch in real time, so the
+    // safe choice is keeping these out of UNATTENDED auto-trading specifically, not trying to catch it.
+    // This only gates the auto-trigger -- these sports still show normally and are still manually
+    // tradeable, since that risk is one you can personally judge in the moment while watching.
+    // Esports is deliberately left out of this list even though some titles are 1v1.
+    const AUTO_EXCLUDED_SPORTS = /^(tennis|boxing|mma|darts)$/i; // table tennis excluded on purpose: short games, low injury/retirement risk
+    if (AUTO_EXCLUDED_SPORTS.test(String(r.sport ?? "").trim())) return;
+    // which side is the auto-fillable sportsbook leg. Goated gets priority when a row happens to
+    // involve two sportsbooks (keeps existing Goated-pair behavior identical); otherwise picks
+    // whichever sportsbook is present -- this is what makes a Bovada-vs-Polymarket arb (no Goated
+    // leg at all) auto-trigger the same way a Goated-vs-Polymarket one already does.
+    const SB_PRIORITY = ["goated", "bovada", "bet105"];
+    let side = null;
+    for (const bk of SB_PRIORITY) { if (r.book_a === bk) { side = "a"; break; } if (r.book_b === bk) { side = "b"; break; } }
+    if (!side) return;
+    const book = side === "a" ? r.book_a : r.book_b;
+    const other = side === "a" ? r.book_b : r.book_a;
+    if (book === "goated" && other === "polymarket") return; // the server-side auto-fire handles these now, so this page must not also buy them
+    const isPair = other === "polymarket" || SPORTBOOKS.has(other);
+    if (!isPair || autoClicked.has(r.id) || vxPend[r.id]) return;
+    // once per real-world event, not just once per specific arb row -- the same match can independently
+    // qualify under a moneyline row AND a spread/total row, each with its own id, which was opening two
+    // separate Goated tabs for the same game
+    const evKey = r.sport + "|" + r.start_time + "|" + [normTeam(r.player_a), normTeam(r.player_b)].sort().join("|");
+    if (autoClickedEvents.has(evKey)) return;
+    // once a side is bought for a game+market, only ever ADD to that same side -- never auto-buy the
+    // opposite side of the same market later just because the odds flipped in its favor. Moneyline and
+    // each spread/total line are tracked separately (r.market distinguishes them); this only applies to
+    // the Polymarket-paired case, since that's the side whose identity we can track here
+    let mkKey = null;
+    if (other === "polymarket") {
+      mkKey = evKey + "|" + r.market;
+      const pmTeam = normTeam(r.book_a === "polymarket" ? r.player_a : r.player_b);
+      const existingDir = vxDir[mkKey];
+      if (existingDir && existingDir !== pmTeam) return;
+    }
+    // pre-match only: don't tie up money on something that doesn't even start today
+    if (!r.is_live) {
+      const start = new Date(r.start_time), now = new Date();
+      const sameDay = start.getFullYear() === now.getFullYear() && start.getMonth() === now.getMonth() && start.getDate() === now.getDate();
+      if (!sameDay) return;
+    }
+    const ia = 1 / r.odds_a, ib = 1 / r.odds_b, sum = ia + ib;
+    let sa = AUTO_BANKROLL * ia / sum, sb = AUTO_BANKROLL * ib / sum;
+    { const w = wholePair(AUTO_BANKROLL, r.odds_a, r.odds_b); if (w) { sa = w[0]; sb = w[1]; } }
+    const otherSide = side === "a" ? "b" : "a";
+    const stake = side === "a" ? sa : sb, otherStake = side === "a" ? sb : sa;
+    const url = gj(r, side, stake, otherStake);
+    if (!url) return;
+    autoClicked.add(r.id);
+    autoClickedEvents.add(evKey);
+    if (mkKey) { vxDir[mkKey] = normTeam(r.book_a === "polymarket" ? r.player_a : r.player_b); vxDirSave(); }
+    const a = document.createElement("a");
+    a.href = url; a.target = "_blank"; a.rel = "noopener noreferrer"; a.style.cssText = "position:fixed;left:-9999px";
+    document.body.appendChild(a);
+    try { a.click(); } catch (e) {}
+    setTimeout(() => { if (a.parentNode) a.parentNode.removeChild(a); }, 3000);
+    console.log("[VX] auto-triggered " + book + "/" + other + " arb #" + r.id + " (" + r.profit_pct.toFixed(2) + "%)");
+    // fire the Polymarket leg AT THE SAME TIME as the Goated leg instead of waiting for Goated's
+    // placement to report back -- that round trip was costing enough time for the Polymarket price
+    // to move past the window, so both buys now start together
+    if (other === "polymarket") {
+      const p = vxPend[r.id] || (vxPend[r.id] = {});
+      const gOdds = side === "a" ? r.odds_a : r.odds_b;
+      p.g = { stake: stake, payout: Math.round(stake * gOdds * 100) / 100, odds: gOdds };
+      p.gBook = book;
+      const inf = vxInfo(r);
+      p.event = inf.event; p.sport = inf.sport; p.pmPick = inf.pmPick; p.gPick = inf.gPick; p.start = inf.start;
+      p.autoOpened = true;
+      vxSave();
+      tmOpen(r.id, true, "auto");
+    }
+  }
+  function render() {
+    const bank = Math.max(1, Number($("bank").value) || 100);
+    const shown = rows.filter((r) => liqFine(r, bank) && !hiddenBooks.has(r.book_a) && !hiddenBooks.has(r.book_b)), live = shown.filter((r) => r.is_live), pre = shown.filter((r) => !r.is_live);
+    // the auto-trigger uses its own fixed AUTO_BANKROLL, not the on-screen bank box, so it must check
+    // liquidity against THAT amount too -- otherwise a thin market can get filtered out of `shown` for
+    // being unfit for a large on-screen bank even though it's perfectly fine for the small auto stake
+    // one bad/unexpected row must never silently block every opportunity after it in the list --
+    // without this, a single throw here stopped the auto-trigger from firing again at all, even for
+    // completely unrelated games on later polls
+    rows.filter((r) => liqFine(r, AUTO_BANKROLL)).forEach((r) => { try { autoTryGoatedPair(r); } catch (e) { console.error("[VX] autoTryGoatedPair failed for #" + r.id, e); } }); // live + pre-match both, regardless of which tab is on screen
+    $("nPre").textContent = pre.length; $("nLive").textContent = live.length;
+    const list = tab === "live" ? live : pre;
+    if (!list.length) {
+      const closest = status && status.best_pct != null
+        ? '<div class="closest">' + status.compared + ' games watched · closest ' + (Array.isArray(status.closest_json) && status.closest_json.length ? status.closest_json.slice(0,5).map((c) => Number(c.pct).toFixed(2) + '% - ' + esc(c.label)).join('<br/>') : Number(status.best_pct).toFixed(2) + '% - ' + esc(status.best_label)) + '</div>' : '';
+      $("list").innerHTML = '<div class="empty"><div class="scope"></div>No ' + (tab === "live" ? "live" : "pre-match") + ' arbs right now.<br/>Watching every game on both books…' + closest + '</div>';
+      return;
+    }
+    $("list").innerHTML = list.map((r) => {
+      const [sa, sb] = pairStakes(r, bank);
+      const profit = Math.min(sa * r.odds_a, sb * r.odds_b) - sa - sb;
+      const isManual = !!manualStake[r.id];
+      const fresh = Date.now() - Date.parse(r.first_seen) < 6e4;
+      const isGoatedPm = (r.book_a === "goated" && r.book_b === "polymarket") || (r.book_b === "goated" && r.book_a === "polymarket");
+      const pmPairId = (tradeOn && r.id && isGoatedPm) ? r.id : null;
+      return '<article class="card"><div class="top">' +
+        '<div class="pct"><b>' + r.profit_pct.toFixed(2) + '%</b><span class="pill">~' + usd(profit) + '</span>' + (isManual ? '<span class="tag other">MANUAL</span>' : '') + '<button type="button" class="editbtn" data-editopen="' + r.id + '" title="Edit the stake for a bet you already placed">✎</button></div>' +
+        '<div class="when">' + (r.is_live ? '<span class="tag live">LIVE</span><span class="age">' + ageText(r.first_seen) + '</span>' + (r.start_time ? '<span class="age">started ' + when(r.start_time) + '</span>' : '') : when(r.start_time)) + (fresh ? '<span class="tag new">NEW</span>' : '') + '</div>' +
+        '<div><div class="sport">' + ICON(r.sport) + ' ' + esc(r.sport) + (r.league ? ' · ' + esc(r.league) : '') + '</div><div class="mkt">' + esc(r.market) + '</div></div>' +
+        '<div class="vs">' + esc(r.player_a) + ' vs<br/>' + esc(r.player_b) + '</div></div>' +
+        (editingId === r.id
+          ? '<div class="legs">' + legEditPair(r, sa, sb) + '</div>'
+          : '<div class="legs">' + leg(r.player_a, r.book_a, r.odds_a, r.liq_a, sa, gj(r, "a", sa, sb), pmPairId, r.url_a) + leg(r.player_b, r.book_b, r.odds_b, r.liq_b, sb, gj(r, "b", sb, sa), pmPairId, r.url_b) + '</div>') +
+        todo(r, sa, sb) + '</article>';
+    }).join("");
+  }
+  async function load() {
+    if (DEMO) { rows = SAMPLE; $("demo").hidden = false; $("pulse").textContent = "demo"; render(); return; }
+    try {
+      const d = await (await fetch("/api/arbs", { cache:"no-store" })).json();
+      rows = d.rows || []; status = d.status;
+      tradeOn = !!(d.trade && d.trade.enabled);
+      const last = status && status.last_scan;
+      const age = last ? Math.round((Date.parse(d.now) - Date.parse(last)) / 1000) : null;
+      $("pulse").textContent = age == null ? "scanner offline" : age < 45 ? "scanned " + age + "s ago" : "scanner stale";
+      $("pulse").classList.toggle("stale", age == null || age >= 45);
+      // beep once when a live arb shows up that was not on the previous poll
+      const liveNow = new Set(rows.filter((r) => r.is_live && liqFine(r, Math.max(1, Number($("bank").value) || 100))).map((r) => r.id));
+      if (soundOn && seenLive) { for (const id of liveNow) { if (!seenLive.has(id)) { beep(); break; } } }
+      seenLive = liveNow;
+      if (editingId != null && !rows.some((r) => r.id === editingId)) editingId = null;
+      if (editingId == null) render();
+    } catch { $("pulse").textContent = "offline"; $("pulse").classList.add("stale"); }
+  }
+  $("tPre").onclick = () => { tab = "pre"; $("tPre").classList.add("on"); $("tLive").classList.remove("on"); render(); };
+  $("tLive").onclick = () => { tab = "live"; $("tLive").classList.add("on"); $("tPre").classList.remove("on"); render(); };
+  // default the on-screen bankroll box to whatever the system is actually auto-trading with, and
+  // remember any manual change across refreshes instead of always resetting to the hardcoded 100
+  try {
+    const savedBank = localStorage.getItem("vxbank");
+    $("bank").value = savedBank != null && savedBank !== "" ? savedBank : String(AUTO_BANKROLL);
+  } catch (e) { $("bank").value = String(AUTO_BANKROLL); }
+  $("bank").addEventListener("input", () => {
+    try { localStorage.setItem("vxbank", $("bank").value); } catch (e) { /* no storage */ }
+    render();
+  });
+
+  // ---------- one-tap Polymarket buy (a confirm sheet; the server re-checks the live price right before ordering) ----------
+  let tmS = null, tmTimer = null;
+  const c1 = (x) => (x * 100).toFixed(1) + "¢";
+  const tmClose = () => { tmS = null; clearTimeout(tmTimer); $("tm").hidden = true; };
+  function tmOpen(id, auto, triggeredBy) {
+    const r = rows.find((x) => x.id === id);
+    if (!r) return;
+    const ia = 1 / r.odds_a, ib = 1 / r.odds_b, sum = ia + ib;
+    const pmIsA = r.book_a === "polymarket";
+    const gOdds = pmIsA ? r.odds_b : r.odds_a;
+    let gStake, pmSpend;
+    const pg = vxPend[id] && vxPend[id].g;
+    if (pg) {
+      // a real sportsbook bet is already placed for this arb -- size Polymarket's spend PROPORTIONALLY
+      // to that REAL stake (using the same ia/ib ratio a whole-dollar pairing would), never from the
+      // on-screen bankroll box, which has no relationship to what was actually staked on the other leg
+      gStake = Number(pg.stake);
+      pmSpend = String(Math.round(gStake * (pmIsA ? ia / ib : ib / ia) * 100) / 100);
+    } else {
+      // pairStakes already applies, in priority order: a per-card ✎ edit, then the Ceiling (if the
+      // selected book is one of this card's two sides), then the normal bankroll split -- so a
+      // manual click always fires with exactly whatever the card is showing on screen right now.
+      const bank = Math.max(1, Number($("bank").value) || 100);
+      const [sa2, sb2] = pairStakes(r, bank);
+      gStake = pmIsA ? sb2 : sa2; pmSpend = String(pmIsA ? sa2 : sb2);
+    }
+    const pick = pmIsA ? r.player_a : r.player_b;
+    tmS = { id: id, busy: false, info: vxInfo(r), auto: !!auto, autoTried: false, triggeredBy: triggeredBy || null };
+    $("tmTitle").textContent = "Buy " + pick + " on Polymarket";
+    $("tmSub").textContent = (r.league ? r.league + " · " : "") + r.market;
+    $("tmPSpend").value = pmSpend;
+    $("tmGStake").value = gStake.toFixed(2);
+    $("tmGPay").value = (gStake * gOdds).toFixed(2);
+    if (pg) { $("tmGStake").value = Number(pg.stake).toFixed(2); $("tmGPay").value = Number(pg.payout).toFixed(2); }
+    if ($("tmAdditional")) $("tmAdditional").checked = false;
+    $("tm").hidden = false;
+    if (auto) {
+      // auto-triggered buys always force regardless of what a quote says (see tmShowQuote), so the
+      // separate quote round-trip beforehand only burns time while the Polymarket price keeps moving --
+      // skip straight to the buy attempt instead of quote-then-decide-then-buy
+      tmS.autoTried = true;
+      $("tmBody").innerHTML = '<div class="tm-msg ok">Placing automatically…</div>';
+      $("tmActions").innerHTML = tmClosers;
+      tmGo("force");
+    } else {
+      tmQuote();
+    }
+  }
+  async function tmApi(mode) {
+    const body = { id: tmS.id, mode: mode, stake: Number($("tmGStake").value), payout: Number($("tmGPay").value), cash: Number($("tmPSpend").value) || 0, additional: !!($("tmAdditional") && $("tmAdditional").checked), triggeredBy: tmS.triggeredBy };
+    const r = await fetch("/api/trade", { method:"POST", headers:{ "content-type":"application/json" }, body: JSON.stringify(body) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || "request failed");
+    return j;
+  }
+  const tmClosers = '<button type="button" class="trbtn" data-tm="close">Close</button>';
+  async function tmQuote() {
+    if (!tmS || tmS.busy) return;
+    $("tmBody").innerHTML = '<div class="tm-msg">Getting the live Polymarket price…</div>';
+    $("tmActions").innerHTML = "";
+    const mine = tmS;
+    try {
+      const q = await tmApi("quote");
+      if (tmS !== mine) return;
+      tmShowQuote(q);
+    } catch (err) {
+      if (tmS !== mine) return;
+      $("tmBody").innerHTML = '<div class="tm-msg bad">' + esc(err.message || err) + '</div>';
+      $("tmActions").innerHTML = '<button type="button" class="trbtn" data-tm="refresh">↻ Try again</button>' + tmClosers;
+    }
+  }
+  function tmShowQuote(q) {
+    const profit = q.profitNow;
+    let h = '<div class="tm-grid">' +
+      '<div><span class="lbl">PRICE NOW</span><div class="big">' + c1(q.p0) + '</div></div>' +
+      '<div><span class="lbl">BREAK-EVEN</span><div class="big">' + c1(q.pMax) + '</div></div>' +
+      '<div><span class="lbl">SHARES TO BUY</span><div class="big">' + q.remaining.toFixed(2) + '</div></div>' +
+      '<div><span class="lbl">COST NOW</span><div class="big">' + dollars(q.costNow) + '</div></div></div>';
+    h += '<div class="tm-msg ' + (profit >= 0 ? "ok" : "bad") + '">' + (profit >= 0
+      ? "At this price you lock about " + money(profit) + " whichever side wins."
+      : "Price is above break-even. Buying now locks a loss of about " + dollars(profit) + " whichever side wins.") + '</div>';
+    if (q.have > 0) h += '<div class="tm-msg">Already bought ' + q.have.toFixed(2) + ' of ' + q.wanted.toFixed(2) + ' shares on this arb.</div>';
+    const lim = q.ok ? q.pMax : q.pForce;
+    h += '<div class="tm-note">It buys at the cheapest prices available and never pays more than ' + c1(lim) + ' a share' +
+      (q.ok ? " (break-even)" : " (3% over break-even)") + '. Most it can spend this tap: ' + dollars(q.ok ? q.costMax : q.costForce) + '.</div>';
+    // auto-triggered buys use FORCE mode unconditionally: filling matters more than the price here --
+    // a worse-priced fill beats sitting unhedged while the Goated leg is already live. This also means
+    // we now try even when the price is already over break-even the moment the sheet opens (previously
+    // that case did nothing at all and just left the position unhedged). Still bounded by the server's
+    // ARB_TRADE_FORCE_PCT ceiling, not unlimited.
+    if (tmS && tmS.auto && !tmS.autoTried && (q.ok || q.canForce) && q.remaining >= 0.01 * q.wanted) {
+      tmS.autoTried = true;
+      $("tmBody").innerHTML = h + '<div class="tm-msg ok">Placing automatically' + (q.ok ? "" : " (over break-even, but filling matters more than price right now)") + '…</div>';
+      $("tmActions").innerHTML = tmClosers;
+      tmGo("force");
+      return;
+    }
+    $("tmBody").innerHTML = h;
+    let a = '<button type="button" class="trbtn" data-tm="refresh">↻ Price</button>';
+    if (q.remaining < 0.01 * q.wanted) a = '<div class="tm-msg ok">Already fully hedged.</div>';
+    else if (q.ok) a += '<button type="button" class="tm-go" data-tm="buy">⚡ Buy ' + q.remaining.toFixed(2) + ' shares</button>';
+    else if (q.canForce) a += '<button type="button" class="tm-go warn" data-tm="force">Buy anyway (accept the loss)</button>';
+    else a += '<div class="tm-msg bad">The price is too far above break-even (over ' + c1(q.pForce) + '). Use Polymarket directly.</div>';
+    $("tmActions").innerHTML = a + tmClosers;
+  }
+  async function tmGo(mode) {
+    if (!tmS || tmS.busy) return;
+    tmS.busy = true;
+    const mine = tmS;
+    $("tmActions").innerHTML = '<div class="tm-msg">Sending the order… do not close this.</div>';
+    try {
+      const res = await tmApi(mode);
+      mine.busy = false;
+      if (tmS !== mine) return;
+      tmShowResult(res);
+    } catch (err) {
+      mine.busy = false;
+      if (tmS !== mine) return;
+      // "already fully hedged" from the server here means a race between this attempt and another
+      // (auto-trigger firing both legs at once, or a manual tap overlapping it) -- the hedge is DONE,
+      // this just lost the race to find that out. That's good news, not an error: show it gracefully
+      // and close on its own instead of sitting as a red box waiting for a manual dismiss.
+      const already = /already.*hedged/i.test(String(err.message || err));
+      if (already) {
+        $("tmBody").innerHTML = '<div class="tm-msg ok">Already fully hedged (another attempt got there first).</div>';
+        $("tmActions").innerHTML = tmClosers;
+        clearTimeout(tmTimer);
+        tmTimer = setTimeout(tmClose, 1800);
+        return;
+      }
+      $("tmBody").innerHTML = '<div class="tm-msg bad">' + esc(err.message || err) + '</div>';
+      $("tmActions").innerHTML = '<button type="button" class="trbtn" data-tm="refresh">↻ Check price</button>' + tmClosers;
+    }
+  }
+  function tmShowResult(r) {
+    try { if (tmS) vxBuyDone(tmS.id, tmS.info, r, tmS.auto); } catch (e) { /* ignore */ }
+    // an auto-triggered attempt that barely moved the needle (no real fill, nothing worth tracking)
+    // shouldn't permanently block this same opportunity from being tried again if it comes back later
+    // as a fresh, better-priced sighting -- without this, autoClicked/vxPend never clear on a zero-fill
+    // failure, silently blacklisting that game's auto-buy for the rest of the browser session
+    if (tmS && tmS.auto && !r.done && r.remainingNow > 0.1 * r.wanted) {
+      delete vxPend[tmS.id];
+      autoClicked.delete(tmS.id);
+      vxSave();
+    }
+    let h = '<div class="tm-grid">' +
+      '<div><span class="lbl">BOUGHT</span><div class="big">' + r.filled.toFixed(2) + ' sh</div></div>' +
+      '<div><span class="lbl">AVG PRICE</span><div class="big">' + (r.avgPaid == null ? "-" : c1(r.avgPaid)) + '</div></div>' +
+      '<div><span class="lbl">COST (EST.)</span><div class="big">' + dollars(r.costEst) + '</div></div>' +
+      '<div><span class="lbl">STILL TO BUY</span><div class="big">' + r.remainingNow.toFixed(2) + '</div></div></div>';
+    if (r.done) h += '<div class="tm-msg ok">Done: both sides are now hedged. Add it to the tracker with the amounts from your Polymarket confirmation.</div>';
+    else if (r.filled > 0) h += '<div class="tm-msg bad">Only part of it filled, so you are still unhedged on ' + r.remainingNow.toFixed(2) + ' shares.' + (r.stop ? " Stopped because " + esc(r.stop) + "." : "") + '</div>';
+    else h += '<div class="tm-msg bad">Nothing was bought.' + (r.stop ? " " + esc(r.stop) + "." : "") + '</div>';
+    $("tmBody").innerHTML = h;
+    let a = "";
+    if (!r.done) a += '<button type="button" class="tm-go" data-tm="buy">Try again</button><button type="button" class="tm-go warn" data-tm="force">Force fill (up to 3% over)</button>';
+    $("tmActions").innerHTML = a + tmClosers;
+    // always close on success; on a failed auto-triggered attempt there's nothing left to retry it
+    // (retries are disabled for auto sessions -- see autoOpened), so close that too rather than leave
+    // the sheet stuck open with buttons nothing will ever click
+    const mine = tmS;
+    if (mine && (r.done || mine.auto)) setTimeout(() => { if (tmS === mine) tmClose(); }, r.done ? 1500 : 4000);
+  }
+  // the VeSTAX sportsbook helper userscript intercepts clicks on this same Goated link in the CAPTURE
+  // phase (it runs at document-start) and calls stopPropagation(), which stops the event before it ever
+  // reaches a normal bubble-phase listener here -- so this has to be its own capture-phase listener too.
+  // Capture-phase listeners on the same node all still fire even after stopPropagation() (only
+  // stopImmediatePropagation() would block that, which the helper script doesn't use).
+  document.addEventListener("click", (e) => {
+    const gpm = e.target.closest("[data-goated-pm]");
+    if (!gpm) return;
+    // don't preventDefault -- let Goated open normally as usual (the helper script handles the tab
+    // and closes it itself when done); just also fire Polymarket immediately and auto-close it too,
+    // exactly like the auto-trigger, so a manual click on Goated now buys both legs on its own
+    const id = Number(gpm.getAttribute("data-goated-pm"));
+    const r = rows.find((x) => x.id === id);
+    if (id && r) {
+      const mkKey = r.sport + "|" + r.start_time + "|" + r.market + "|" + [normTeam(r.player_a), normTeam(r.player_b)].sort().join("|");
+      const pmTeam = normTeam(r.book_a === "polymarket" ? r.player_a : r.player_b);
+      const existingDir = vxDir[mkKey];
+      if (!existingDir || existingDir === pmTeam) {
+        vxDir[mkKey] = pmTeam; vxDirSave();
+        tmOpen(id, true, "manual");
+      }
+    }
+  }, true);
+  document.addEventListener("click", (e) => {
+    const buy = e.target.closest("[data-buy]");
+    if (buy) { e.preventDefault(); tmOpen(Number(buy.getAttribute("data-buy"))); return; }
+    const act = e.target.closest("[data-tm]");
+    if (!act) return;
+    const v = act.getAttribute("data-tm");
+    if (v === "close") { if (!tmS || !tmS.busy) tmClose(); }
+    else if (v === "refresh") tmQuote();
+    else if (v === "buy" || v === "force") tmGo(v);
+  });
+  const tmRequote = () => { clearTimeout(tmTimer); tmTimer = setTimeout(() => { if (tmS && !tmS.busy) tmQuote(); }, 500); };
+  $("tmGStake").addEventListener("input", tmRequote);
+  $("tmGPay").addEventListener("input", tmRequote);
+  $("tmPSpend").addEventListener("input", tmRequote);
+
+  // ---------- screenshot tab: upload bet screenshots, review the cards it builds, add them to the tracker ----------
+  let scanImgs = [], scanRes = null;
+  const SC_SITES = { polymarket:"Polymarket", goated:"Goated", bet105:"Bet105", novig:"Novig", dexsport:"Dexsport", other:"Other" };
+  function showTab(which) {
+    tab = which === "live" ? "live" : "pre";
+    $("tPre").classList.toggle("on", which === "pre");
+    $("tLive").classList.toggle("on", which === "live");
+    $("tScan").classList.toggle("on", which === "scan");
+    $("list").hidden = which === "scan";
+    $("scanPane").hidden = which !== "scan";
+    if (which !== "scan") render();
+  }
+  $("tPre").onclick = () => showTab("pre");
+  $("tLive").onclick = () => showTab("live");
+  $("tScan").onclick = () => showTab("scan");
+  function shrinkImage(file) {
+    return new Promise((resolve, reject) => {
+      const u = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = () => {
+        const sc = Math.min(1, 1600 / Math.max(img.width, img.height));
+        const c = document.createElement("canvas");
+        c.width = Math.round(img.width * sc); c.height = Math.round(img.height * sc);
+        c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+        const du = c.toDataURL("image/jpeg", 0.85);
+        URL.revokeObjectURL(u);
+        resolve({ data: du.split(",")[1], url: du });
+      };
+      img.onerror = () => { URL.revokeObjectURL(u); reject(new Error("Couldn't open " + file.name)); };
+      img.src = u;
+    });
+  }
+  function paintThumbs() {
+    $("scanThumbs").innerHTML = scanImgs.map((m) => '<img src="' + m.url + '" alt="">').join("");
+    $("scanGo").disabled = !scanImgs.length;
+    $("scanMsg").textContent = scanImgs.length ? scanImgs.length + (scanImgs.length === 1 ? " screenshot" : " screenshots") + " ready." : "";
+  }
+  $("scanFiles").addEventListener("change", async (e) => {
+    const files = Array.from(e.target.files || []).slice(0, Math.max(0, 8 - scanImgs.length));
+    $("scanMsg").textContent = "Preparing images...";
+    for (const f of files) { try { scanImgs.push(await shrinkImage(f)); } catch (err) { $("scanMsg").textContent = err.message; } }
+    e.target.value = "";
+    paintThumbs();
+  });
+  $("scanClear").onclick = () => { scanImgs = []; scanRes = null; $("scanResults").innerHTML = ""; paintThumbs(); };
+  $("scanGo").onclick = async () => {
+    if (!scanImgs.length) return;
+    $("scanGo").disabled = true;
+    $("scanMsg").textContent = "Reading your screenshots... this takes 10 to 30 seconds.";
+    $("scanResults").innerHTML = "";
+    try {
+      const r = await fetch("/api/scan", { method:"POST", headers:{ "content-type":"application/json" }, body: JSON.stringify({ images: scanImgs.map((m) => m.data) }) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || "Couldn't read the screenshots.");
+      scanRes = j; renderScan();
+      $("scanMsg").textContent = "Check the numbers below and fix anything that looks off, then tap Add to tracker.";
+    } catch (err) { $("scanMsg").textContent = (err && err.message) ? err.message : "Something went wrong."; }
+    $("scanGo").disabled = !scanImgs.length;
+  };
+  const scVal = (v) => (v == null ? "" : String(v));
+  const scOpts = (v) => Object.keys(SC_SITES).map((s) => '<option value="' + s + '"' + (s === v ? " selected" : "") + ">" + SC_SITES[s] + "</option>").join("");
+  function readScanCard(i) {
+    const el = document.querySelector('#scanResults .sc-card[data-i="' + i + '"]');
+    const g = (f) => el.querySelector('[data-f="' + f + '"]').value.trim();
+    const num = (f) => Number(g(f).replace("$", "").replace(",", ""));
+    return { event: g("event"), sport: g("sport"),
+      a: { book: g("abook"), pick: g("apick"), stake: num("astake"), payout: num("apay") },
+      b: { book: g("bbook"), pick: g("bpick"), stake: num("bstake"), payout: num("bpay") } };
+  }
+  function scanCalc(c) {
+    if (!(c.a.stake > 0 && c.b.stake > 0 && c.a.payout > c.a.stake && c.b.payout > c.b.stake)) return "Fill in both stakes and payouts.";
+    const tin = c.a.stake + c.b.stake, pa = c.a.payout - tin, pb = c.b.payout - tin;
+    return "In " + dollars(tin) + " · bet 1 wins " + money(pa) + " · bet 2 wins " + money(pb) + " · locked " + money(Math.min(pa, pb));
+  }
+  function scanDup(c) {
+    const same = (x, y) => Math.abs(x - y) < 0.011;
+    return tracks.some((t) => (same(t.a_stake, c.a.stake) && same(t.b_stake, c.b.stake)) || (same(t.a_stake, c.b.stake) && same(t.b_stake, c.a.stake)));
+  }
+  function renderScan() {
+    const arbs = (scanRes && scanRes.arbs) || [], un = (scanRes && scanRes.unpaired) || [];
+    let h = "";
+    if (!arbs.length) h += '<div class="empty">No complete pairs found in those screenshots.<br/>Upload both sides of each arb: the Polymarket screen and the Goated screen.</div>';
+    arbs.forEach((a, i) => {
+      h += '<div class="sc-card" data-i="' + i + '"><div class="sc-head">' +
+        '<div class="lbl">MATCH</div><input data-f="event" value="' + esc(a.event) + '"/>' +
+        '<div class="lbl">SPORT</div><input data-f="sport" value="' + esc(a.sport) + '"/>' +
+        (a.warn ? '<div class="sc-warn">Check: ' + esc(a.warn) + '</div>' : '') + '</div><div class="sc-grid">';
+      ["a", "b"].forEach((k) => {
+        const l = a[k] || {};
+        h += '<div class="sc-leg"><div class="lbl">BET ' + (k === "a" ? "1" : "2") + '</div>' +
+          '<select data-f="' + k + 'book">' + scOpts(l.book) + '</select>' +
+          '<input data-f="' + k + 'pick" value="' + esc(l.pick) + '" placeholder="Pick"/>' +
+          '<input data-f="' + k + 'stake" inputmode="decimal" value="' + scVal(l.stake) + '" placeholder="Stake $"/>' +
+          '<input data-f="' + k + 'pay" inputmode="decimal" value="' + scVal(l.payout) + '" placeholder="Pays if it wins $"/></div>';
+      });
+      h += '</div><div class="sc-sum"><div class="sc-calc"></div><button type="button" class="tr-go" data-add="' + i + '">Add to tracker</button></div></div>';
+    });
+    if (un.length) {
+      h += '<div class="sc-card"><div class="sc-head"><div class="lbl">COULD NOT PAIR</div>' +
+        un.map((u) => '<div class="sc-warn">' + esc((SC_SITES[u.book] || u.book) + ": " + (u.event || "") + " · " + (u.pick || "") + " · stake " + scVal(u.stake) + " · pays " + scVal(u.payout)) + '</div>').join("") +
+        '<div class="sc-warn">Upload the matching screenshot for the other side and scan again.</div></div></div>';
+    }
+    if (scanRes && scanRes.notes) h += '<div class="note">' + esc(scanRes.notes) + '</div>';
+    $("scanResults").innerHTML = h;
+    arbs.forEach((a, i) => { const el = document.querySelector('#scanResults .sc-card[data-i="' + i + '"]'); if (el) el.querySelector(".sc-calc").textContent = scanCalc(readScanCard(i)); });
+  }
+  $("scanResults").addEventListener("input", (e) => {
+    const card = e.target.closest(".sc-card[data-i]");
+    if (card) card.querySelector(".sc-calc").textContent = scanCalc(readScanCard(card.getAttribute("data-i")));
+  });
+  $("scanResults").addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-add]");
+    if (!b) return;
+    const c = readScanCard(b.getAttribute("data-add"));
+    if (scanDup(c) && !confirm("This looks like it is already in your tracker. Add it again?")) return;
+    b.disabled = true; b.textContent = "Saving...";
+    try {
+      await trPost("/api/tracker", { event: c.event, sport: c.sport, league: "", note: "Added from screenshots", a: c.a, b: c.b });
+      b.textContent = "Added ✓";
+      await loadTracker();
+    } catch (err) { b.disabled = false; b.textContent = "Add to tracker"; alert("Couldn't add: " + (err && err.message ? err.message : err)); }
+  });
+
+  // ---------- Goated helper (userscript): card links carry the pick + stake; accepted Goated bets come back here ----------
+  let vxPend = {};
+  try { vxPend = JSON.parse(localStorage.getItem("vxp") || "{}"); } catch (e) { vxPend = {}; }
+  const vxSave = () => { try { localStorage.setItem("vxp", JSON.stringify(vxPend)); } catch (e) { /* no storage */ } };
+  // which team/side is already bought (on Polymarket) for a given game+market -- kept separate from
+  // vxPend so it survives a failed/cleared attempt: once real money is on one side of a market, auto-buy
+  // should only ever ADD to that same side, never flip to the opposite side of the same market later
+  let vxDir = {};
+  try { vxDir = JSON.parse(localStorage.getItem("vxdir") || "{}"); } catch (e) { vxDir = {}; }
+  const vxDirSave = () => { try { localStorage.setItem("vxdir", JSON.stringify(vxDir)); } catch (e) { /* no storage */ } };
+  // whole-dollar stakes [legA, legB] that still win either way: best locked profit (>= $0.01) among integer pairs near the ideal split, total within the bankroll
+  function wholePair(bank, oA, oB) {
+    if (!(bank >= 2) || !(oA > 1) || !(oB > 1)) return null;
+    const ia = 1 / oA, ib = 1 / oB, s = ia + ib, a0 = bank * ia / s, b0 = bank * ib / s;
+    let best = null, bp = 0.01 - 1e-9;
+    for (let a = Math.max(1, Math.floor(a0) - 3); a <= Math.ceil(a0) + 3; a++) {
+      for (let b = Math.max(1, Math.floor(b0) - 3); b <= Math.ceil(b0) + 3; b++) {
+        if (a + b > bank + 1e-9) continue;
+        const p = Math.min(a * oA, b * oB) - a - b;
+        if (p > bp) { bp = p; best = [a, b]; }
+      }
+    }
+    return best;
+  }
+  // hide arbs whose Polymarket depth at the quoted price cannot cover the Polymarket stake (25% cushion, at least $10)
+  function liqFine(r, bank) {
+    const pmIsA = r.book_a === "polymarket";
+    if (!pmIsA && r.book_b !== "polymarket") return true;
+    const ia = 1 / r.odds_a, ib = 1 / r.odds_b, sum = ia + ib;
+    let sa = bank * ia / sum, sb = bank * ib / sum;
+    const w = wholePair(bank, r.odds_a, r.odds_b);
+    if (w) { sa = w[0]; sb = w[1]; }
+    const liq = Number(pmIsA ? r.liq_a : r.liq_b) || 0;
+    return liq >= Math.max(10, (pmIsA ? sa : sb) * 1.25);
+  }
+  function vxInfo(r) {
+    const pmIsA = r.book_a === "polymarket";
+    const event = r.market === "Moneyline" ? r.player_a + " vs " + r.player_b : (r.league || "") + " - " + r.market;
+    return { event: event, sport: r.sport || "", pmPick: pmIsA ? r.player_a : r.player_b, gPick: pmIsA ? r.player_b : r.player_a, start: r.start_time || null };
+  }
+  // the Goated link gets a #vx=... tail (base64) that the userscript reads: which bet to select and how much to stake
+  const SPORTBOOKS = new Set(["goated", "bet105", "bovada"]);
+  function hashKey(book) { return book === "bet105" ? "#vxb=" : book === "bovada" ? "#vxv=" : "#vx="; }
+  function jobB64(obj) {
+    try { return btoa(unescape(encodeURIComponent(JSON.stringify(obj)))).replace(/[+]/g, "-").replace(/[/]/g, "_").replace(/=+/g, ""); }
+    catch (e) { return null; }
+  }
+  function sideJob(book, id, name, stake, odds, mk, inf) {
+    const job = { bk: book, id: id, pick: name, stake: Math.round(stake * 100) / 100, odds: Math.round(odds * 1000) / 1000, ev: inf.event, sp: inf.sport, pp: inf.pmPick, gp: inf.gPick };
+    if (/^Total/i.test(mk)) {
+      job.kind = "total"; job.side = /^under/i.test(name) ? "under" : "over";
+      const mm = /([0-9]+(?:[.][0-9]+)?)\s*$/.exec(name); job.line = mm ? parseFloat(mm[1]) : null;
+    } else if (/^Spread/i.test(mk)) {
+      const mm = /^(.*?)\s*([+-][0-9]+(?:[.][0-9]+)?)\s*$/.exec(name);
+      job.kind = "spread"; job.team = mm ? mm[1].trim() : name; job.line = mm ? parseFloat(mm[2]) : null;
+    } else job.kind = "win";
+    return job;
+  }
+  // encodes this leg's job for the userscript; if the OTHER leg is also a helper-supported sportsbook,
+  // attaches a ready-to-open link for it (job.next) so that book's helper auto-chains once this leg is placed
+  function gj(r, side, stake, otherStake) {
+    const url = side === "a" ? r.url_a : r.url_b;
+    const book = side === "a" ? r.book_a : r.book_b;
+    if (!SPORTBOOKS.has(book) || !url) return url;
+    const name = side === "a" ? r.player_a : r.player_b;
+    const odds = side === "a" ? r.odds_a : r.odds_b;
+    const mk = String(r.market || "");
+    const inf = vxInfo(r);
+    const job = sideJob(book, r.id, name, stake, odds, mk, inf);
+    const oSide = side === "a" ? "b" : "a";
+    const oBook = oSide === "a" ? r.book_a : r.book_b;
+    const oUrl = oSide === "a" ? r.url_a : r.url_b;
+    if (SPORTBOOKS.has(oBook) && oUrl && otherStake != null) {
+      const oName = oSide === "a" ? r.player_a : r.player_b;
+      const oOdds = oSide === "a" ? r.odds_a : r.odds_b;
+      const oJob = sideJob(oBook, r.id, oName, otherStake, oOdds, mk, inf);
+      oJob.secondary = true;
+      const ob64 = jobB64(oJob);
+      if (ob64) job.next = oUrl + hashKey(oBook) + ob64;
+    }
+    const b = jobB64(job);
+    if (!b) return url;
+    return url + hashKey(book) + b;
+  }
+  // both legs are in (Goated bet from the userscript + Polymarket Buy finished): add the arb to the tracker once
+  function vxTry(id) {
+    const p = vxPend[id];
+    if (!p || !p.g || !p.pmDone || p.added || !p.pm || !(p.pm.shares > 0) || !(p.pm.cost > 0)) return;
+    p.added = true; vxSave();
+    const body = { event: p.event || "Arb", sport: p.sport || "", league: "", event_start: p.start || null, note: "Auto-added: Goated from the bet slip; Polymarket cost estimated from the order fill",
+      a: { book: "polymarket", pick: p.pmPick || "Polymarket side", stake: Number(p.pm.cost.toFixed(2)), payout: Number(p.pm.shares.toFixed(2)) },
+      b: { book: p.gBook || "goated", pick: p.gPick || "Other side", stake: p.g.stake, payout: p.g.payout } };
+    trPost("/api/tracker", body).then(() => { delete vxPend[id]; vxSave(); toast("Arb added to your tracker ✓"); loadTracker(); })
+      .catch((err) => { p.added = false; vxSave(); toast("Couldn't add to the tracker: " + (err && err.message ? err.message : err)); });
+  }
+  function vxBuyDone(id, info, r, auto) {
+    if (!id || !info || !r) return;
+    const p = vxPend[id] || (vxPend[id] = {});
+    p.event = p.event || info.event; p.sport = p.sport || info.sport; p.pmPick = p.pmPick || info.pmPick; p.gPick = p.gPick || info.gPick; p.start = p.start || info.start;
+    p.pm = p.pm || { shares: 0, cost: 0 };
+    if (r.filled > 0) { p.pm.cost += Number(r.costEst || 0); p.pm.shares = Number(r.haveNow || (p.pm.shares + r.filled)); }
+    // an auto-triggered buy only ever gets one attempt (no retry follows), so a near-complete fill (say
+    // 98%) should still finalize for tracking rather than dangle on the strict 99%+ "done" threshold.
+    // but ANY fill greater than zero is NOT enough -- a few cents filled against dollars wanted is a
+    // real, nearly-unhedged position, not a locked-in arb, and must never get logged as one
+    if (r.done || (auto && r.remainingNow <= 0.1 * r.wanted)) p.pmDone = true;
+    vxSave();
+    if (p.pmDone) vxTry(id);
+  }
+  function vxGoatedBet(g) {
+    if (!g || !g.id || Date.now() - Number(g.ts || 0) > 30 * 60000) return;
+    if (!(g.stake > 0) || !(g.payout > g.stake)) { toast("Goated bet seen, but the numbers were unclear. Use the Scan tab."); return; }
+    const p = vxPend[g.id] || (vxPend[g.id] = {});
+    p.g = { stake: g.stake, payout: g.payout, odds: g.odds }; p.gBook = g.bk || "goated";
+    p.event = g.ev || p.event; p.sport = g.sp || p.sport; p.pmPick = g.pp || p.pmPick; p.gPick = g.gp || p.gPick;
+    vxSave();
+    toast((BOOK[g.bk] ? BOOK[g.bk][1] : "Goated") + " bet recorded. Tap ⚡ Buy to finish.");
+    const r = rows.find((x) => x.id === g.id);
+    const hasPM = !!r && (r.book_a === "polymarket" || r.book_b === "polymarket");
+    if (!hasPM) { /* cross-sportsbook arb: no Polymarket leg, nothing more to do here */ }
+    else if (p.pmDone) vxTry(g.id);
+    else if (p.autoOpened) { /* already handled concurrently */ }
+    else if (typeof tmOpen === "function") tmOpen(g.id, true);
+  }
+  window.addEventListener("message", (e) => {
+    if (e.source === window && e.data && e.data.vxHelper) {
+      try { if (!sessionStorage.getItem("vxhelper")) { sessionStorage.setItem("vxhelper", "1"); toast("Goated helper connected ✓"); } } catch (x) { /* ignore */ }
+      return;
+    }
+    if (e.source !== window || !e.data || !e.data.vxGoated) return;
+    const g = e.data.vxGoated;
+    let seen = "";
+    try { seen = localStorage.getItem("vxseen") || ""; } catch (x) { /* ignore */ }
+    if (String(g.ts) === seen) return;
+    try { localStorage.setItem("vxseen", String(g.ts)); } catch (x) { /* ignore */ }
+    vxGoatedBet(g);
+  });
+
+  // ---------- arb tracker (arbs you actually placed) ----------
+  let tracks = [];
+  const trTotal = (t) => t.a_stake + t.b_stake;
+  const trLocked = (t) => Math.min(t.a_payout, t.b_payout) - trTotal(t);
+  const trProfit = (t) => t.returned == null ? null : t.returned - trTotal(t);
+  const TRNAMES = { polymarket:"Polymarket", goated:"Goated", dexsport:"Dexsport", bet105:"Bet105", novig:"Novig", other:"Other" };
+  async function trPost(path, body) {
+    const r = await fetch(path, { method:"POST", headers:{ "content-type":"application/json" }, body: JSON.stringify(body) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || "request failed");
+    return j;
+  }
+  function trLeg(side, t) {
+    const book = t[side + "_book"], pick = t[side + "_pick"], stake = t[side + "_stake"], payout = t[side + "_payout"];
+    const abbr = (BOOK[book] || [String(book).slice(0, 2).toUpperCase()])[0];
+    const won = t.status === "won" && t.winner === side;
+    const odds = payout / stake;
+    return '<div class="leg"><div class="who">' + esc(pick) + (won ? " ✅" : "") + '</div><div class="row"><div>' +
+      '<div class="stake">' + dollars(stake) + '</div>' +
+      '<div class="meta">' + esc(TRNAMES[book] || book) + ' · ' + odds.toFixed(2) + '</div>' +
+      '<div class="ret">pays ' + dollars(payout) + '</div>' + (t.status === "open" ? '<div class="ret" style="font-weight:700;color:var(--' + (payout - trTotal(t) >= 0 ? "win" : "loss") + ')">if wins ' + money(payout - trTotal(t)) + '</div>' : '') + '</div>' +
+      '<span class="odds"><span class="logo lg-' + esc(book) + '">' + abbr + '</span>' + amer(odds) + '</span></div></div>';
+  }
+  function trCard(t) {
+    const open = t.status === "open";
+    const profit = open ? trLocked(t) : trProfit(t);
+    const pct = 100 * profit / trTotal(t);
+    const chip = open ? '<span class="tag new">OPEN</span>' : t.status === "won" ? '<span class="tag settled">SETTLED</span>' : '<span class="tag other">SETTLED</span>';
+    const neg = profit < 0 ? ' style="color:var(--loss)"' : "";
+    const sub = open ? "locked in · " : "profit · ";
+    let h = '<article class="card"><div class="top">' +
+      '<div class="pct"><b' + neg + '>' + (pct >= 0 ? "+" : "-") + Math.abs(pct).toFixed(2) + '%</b><span class="pill"' + neg + '>' + money(profit) + '</span></div>' +
+      '<div class="when">' + chip + '</div>' +
+      '<div><div class="sport">' + ICON(t.sport) + ' ' + esc(t.sport || "") + (t.league ? ' · ' + esc(t.league) : '') + (t.event_start ? ' · ' + esc(when(t.event_start)) : ' <span style="color:var(--loss);font-weight:700">· LIVE BET</span>') + '</div><div class="mkt">' + esc(t.event) + '</div></div>' +
+      '<div class="vs">' + sub + 'in ' + dollars(trTotal(t)) + '<br/>' + (open ? "payout " + dollars(Math.min(t.a_payout, t.b_payout)) + " either way" : "returned " + dollars(t.returned)) + '</div></div>' +
+      '<div class="legs">' + trLeg("a", t) + trLeg("b", t) + '</div>';
+    if (t.note) h += '<div class="trnote">' + esc(t.note) + '</div>';
+    h += '<div class="trbtns">';
+    if (open) {
+      h += '<span class="lbl">SETTLE:</span>' +
+        '<button class="trbtn" data-act="settle" data-o="a" data-id="' + t.id + '" data-name="' + esc(t.a_pick) + '">' + esc(t.a_pick) + ' won</button>' +
+        '<button class="trbtn" data-act="settle" data-o="b" data-id="' + t.id + '" data-name="' + esc(t.b_pick) + '">' + esc(t.b_pick) + ' won</button>' +
+        '<button class="trbtn" data-act="settle" data-o="other" data-id="' + t.id + '">Void / other</button>';
+    } else {
+      h += '<span class="lbl">SETTLED ' + esc(when(t.settled_at)) + '</span>';
+    }
+    h += '<button class="trbtn danger" data-act="delete" data-id="' + t.id + '">Delete</button></div></article>';
+    return h;
+  }
+  function renderTracker() {
+    const open = tracks.filter((t) => t.status === "open"), done = tracks.filter((t) => t.status !== "open");
+    const locked = open.reduce((s, t) => s + trLocked(t), 0);
+    const realized = done.reduce((s, t) => s + (trProfit(t) || 0), 0);
+    const used = done.reduce((s, t) => s + trTotal(t), 0);
+    const inOpen = open.reduce((s, t) => s + trTotal(t), 0);
+    $("trLocked").textContent = money(locked); color($("trLocked"), locked);
+    $("trOpenN").textContent = open.length + (open.length === 1 ? " open arb" : " open arbs");
+    $("trRealized").textContent = money(realized); color($("trRealized"), realized);
+    $("trDoneN").textContent = done.length + " settled";
+    $("trRoi").textContent = used ? (100 * realized / used).toFixed(2) + "%" : "-";
+    $("trIn").textContent = dollars(inOpen);
+    $("trList").innerHTML = tracks.length ? tracks.map(trCard).join("") : '<div class="empty">No arbs tracked yet.<br/>Tap "Add an arb" below after you place one.</div>';
+  }
+  async function loadTracker() {
+    try {
+      const d = await (await fetch("/api/tracker", { cache:"no-store" })).json();
+      tracks = d.rows || []; renderTracker();
+    } catch (e) { /* keep last view */ }
+  }
+  $("trList").addEventListener("click", async (e) => {
+    const b = e.target.closest("button[data-act]");
+    if (!b) return;
+    const id = Number(b.dataset.id), act = b.dataset.act;
+    try {
+      if (act === "settle") {
+        const o = b.dataset.o;
+        if (o === "other") {
+          const v = prompt("Void / other: how much came back in total across both sites? (dollars, for example 65.60)");
+          if (v == null) return;
+          const n = Number(String(v).replace("$", "").replace(",", "").trim());
+          if (!(n >= 0)) { alert("Enter a number like 65.60"); return; }
+          await trPost("/api/tracker/settle", { id: id, outcome: "other", returned: n });
+        } else {
+          if (!confirm("Mark this arb settled with " + b.dataset.name + " winning?")) return;
+          await trPost("/api/tracker/settle", { id: id, outcome: o });
+        }
+      } else if (act === "delete") {
+        if (!confirm("Delete this tracked arb? This can't be undone.")) return;
+        await trPost("/api/tracker/delete", { id: id });
+      }
+      await loadTracker();
+    } catch (err) { alert("Couldn't save: " + (err && err.message ? err.message : err)); }
+  });
+  $("trAdd").addEventListener("click", async () => {
+    const v = (id) => $(id).value.trim();
+    const body = { event: v("tEvent"), sport: v("tSport"), league: v("tLeague"), note: v("tNote"),
+      a: { book: v("tABook"), pick: v("tAPick"), stake: Number(v("tAStake")), payout: Number(v("tAPay")) },
+      b: { book: v("tBBook"), pick: v("tBPick"), stake: Number(v("tBStake")), payout: Number(v("tBPay")) } };
+    $("trMsg").textContent = "Saving…";
+    try {
+      await trPost("/api/tracker", body);
+      ["tEvent","tSport","tLeague","tNote","tAPick","tAStake","tAPay","tBPick","tBStake","tBPay"].forEach((id) => { $(id).value = ""; });
+      $("trMsg").textContent = "Added.";
+      await loadTracker();
+    } catch (err) { $("trMsg").textContent = (err && err.message) ? err.message : "Couldn't save."; }
+  });
+  loadTracker(); setInterval(loadTracker, 60000);
+
+  // ---------- manual arbitrage calculator (runs in the browser only) ----------
+  // Polymarket: buying 1 share at price p costs p (+ taker fee 0.0695*p*(1-p)) and pays $1 if it wins.
+  // Other site: stake S at decimal odds d pays S*d if it wins.
+  // Equal payout X on both sides:  shares = X,  other stake = X/d,  total = X*(cost per share) + X/d.
+  function calcArb() {
+    const p = Number($("aPm").value) / 100, d = Number($("aOdds").value), total = Number($("aTotal").value);
+    const v = $("aVerdict");
+    if (!(p > 0 && p < 1) || !(d > 1) || !(total > 0)) {
+      v.className = "verdict"; v.textContent = "Enter a Polymarket price (1-99¢), decimal odds above 1.00, and an amount.";
+      ["aPmStake","aOtherStake","aPayout","aProfit"].forEach((id) => { $(id).textContent = "$0.00"; $(id).classList.remove("win","loss"); });
+      $("aPmInfo").textContent = "—"; $("aOtherInfo").textContent = "—"; $("aRoi").textContent = "—"; $("aNote").textContent = "";
+      return;
+    }
+    const fee = $("aFee").checked ? 0.0695 * p * (1 - p) : 0;
+    const c = p + fee;                       // real cost per Polymarket share
+    const book = c + 1 / d;                  // combined implied probability (under 1 = arbitrage)
+    const X = total / book;                  // payout either way
+    const pmStake = X * c, otherStake = X / d, profit = X - total, roi = profit / total;
+    $("aPmStake").textContent = dollars(pmStake);
+    $("aPmInfo").textContent = "Buy " + X.toFixed(2) + " shares at " + (p * 100).toFixed(1) + "¢" + (fee ? " (" + (c * 100).toFixed(2) + "¢ with fee)" : "");
+    $("aOtherStake").textContent = dollars(otherStake);
+    $("aOtherInfo").textContent = "Bet the other side at " + d.toFixed(2) + " → returns " + dollars(otherStake * d);
+    $("aPayout").textContent = dollars(X);
+    $("aProfit").textContent = money(profit); color($("aProfit"), profit);
+    $("aRoi").textContent = (roi >= 0 ? "+" : "") + (100 * roi).toFixed(2) + "% on " + dollars(total);
+    const needOdds = 1 / (1 - c);            // odds needed at the other site to break even
+    const maxPm = (() => { const target = 1 - 1 / d; if (!$("aFee").checked) return target; let lo = 0, hi = 1;
+      for (let i = 0; i < 40; i++) { const m = (lo + hi) / 2; (m + 0.0695 * m * (1 - m) < target) ? lo = m : hi = m; } return lo; })();
+    if (book < 1) {
+      v.className = "verdict good"; v.textContent = "✅ Arbitrage! Guaranteed " + money(profit) + " (" + (100 * roi).toFixed(2) + "%) whichever side wins.";
+    } else {
+      v.className = "verdict bad"; v.textContent = "❌ No arbitrage: you'd lose " + dollars(-profit) + " (" + (100 * roi).toFixed(2) + "%) whichever side wins.";
+    }
+    $("aNote").textContent = "Break-even: other-site odds of " + needOdds.toFixed(3) + "+ at this Polymarket price, or a Polymarket price of " +
+      (maxPm * 100).toFixed(1) + "¢ or less at these odds. Make sure both sides are the same match and market, and place both bets quickly. Prices move.";
+  }
+  ["aPm","aOdds","aTotal","aFee"].forEach((id) => $(id).addEventListener("input", calcArb));
+  calcArb();
+
+  load(); if (!DEMO) setInterval(load, 1500);
+</script>
+</body></html>
