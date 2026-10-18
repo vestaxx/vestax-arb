@@ -45,6 +45,10 @@ export function makeArbBuy(d: Deps) {
     const m = /^([^|~]+)\|([ab])$/.exec(key);
     if (!m) throw new Error("Only Goated-vs-Polymarket moneyline arbs can be bought this way.");
     const pmSlug = m[1], long = m[2] === "a";
+    // Polymarket nets opposite sides of the same market, so buying the other side of a game you already hold
+    // would cancel the hedge you bought before. Same rule auto-fire already follows.
+    const [flip]: any = await sql`SELECT 1 AS x FROM arb_trades WHERE opp_key = ${pmSlug + "|" + (long ? "b" : "a")} AND filled_shares > 0 AND created_at > now() - interval '12 hours' LIMIT 1`;
+    if (flip) throw new Error("You already bought the opposite side of this game on Polymarket. Polymarket nets opposite sides, so this would cancel that hedge. Nothing was bought.");
     const leg = d.legs.get(key);
     if (!leg || Date.now() - leg.at > 120000) throw new Error("No fresh Goated details for this arb yet. Wait a few seconds for the next scan and try again.");
 
@@ -94,7 +98,11 @@ export function makeArbBuy(d: Deps) {
         });
         const j: any = await r.json().catch(() => ({}));
         let ok = false, err = String(j?.error ?? "");
-        try { const e = JSON.parse(String(j?.raw ?? ""))?.data?.[0]; ok = e?.success === true; if (!ok) err = String(e?.error ?? err ?? "bet rejected"); } catch { if (!err) err = "unreadable reply from Goated"; }
+        if (typeof j?.success === "boolean") { // the VPS reads Goated's full reply and tells us directly
+          ok = j.success; if (!ok) err = String(j?.error || err || "bet rejected");
+        } else { // older VPS version: its reply was cut at 2000 chars, so a good bet could look unreadable
+          try { const e = JSON.parse(String(j?.raw ?? ""))?.data?.[0]; ok = e?.success === true; if (!ok) err = String(e?.error ?? err ?? "bet rejected"); } catch { if (!err) err = "unreadable reply from Goated (it may still have been placed -- check Goated)"; }
+        }
         return { ok, err };
       })();
       const pmP = d.trade({ ...tradeBody, mode: "buy" });
