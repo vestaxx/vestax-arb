@@ -2,7 +2,7 @@
 // BET105 HEADLESS TEST (Oct 14 2026): one-shot probe via Browserless to see if Cloudflare still blocks a real headless browser.
 import { SQL } from "bun";
 import { PolymarketUS } from "polymarket-us";
-
+import { goatedProbeRoute } from "./goated-probe";
 const sql = new SQL({ url: Bun.env.DATABASE_URL!, max: 3, idleTimeout: 30 });
 const KEY = Bun.env.ARB_KEY ?? "";
 const UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36";
