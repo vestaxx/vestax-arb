@@ -1972,6 +1972,7 @@ async function logo(): Promise<Uint8Array | null> {
 }
 let pageCache: { at: number; html: string } | null = null;
 async function getPage(): Promise<string | null> {
+  try { const f = Bun.file(import.meta.dir + "/arbs-page.html"); if (await f.exists()) return await f.text(); } catch (e: any) { console.error("arbs-page.html read failed:", e?.message ?? e); }
   if (pageCache && Date.now() - pageCache.at < 30000) return pageCache.html;
   try {
     const rows: any = await sql`SELECT convert_from(data, 'UTF8') AS html FROM assets WHERE name = 'arbs_page'`;
