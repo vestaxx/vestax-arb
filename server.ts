@@ -204,7 +204,10 @@ async function trade(body: any) {
   const ceiling = mode === "force" ? pForce : pMax;
   if (p0 > ceiling) throw new Error(`The price is ${(p0 * 100).toFixed(1)}¢, above the ${(ceiling * 100).toFixed(1)}¢ limit. Nothing was bought.`);
   const worst = cashMode ? leftCash0 : remaining * costPerShare(ceiling);
-  if (worst > TRADE_MAX_USD) throw new Error(`That could spend up to $${worst.toFixed(2)}, over the $${TRADE_MAX_USD} cap per tap. Nothing was bought.`);
+  // the per-tap cap stays fully enforced for anything not explicitly tagged "manual" -- that
+  // includes "auto" and also a missing/untagged triggeredBy, so an older client or a future bug in
+  // the tagging itself fails safe into the capped behavior rather than silently bypassing it.
+  if (triggeredBy !== "manual" && worst > TRADE_MAX_USD) throw new Error(`That could spend up to $${worst.toFixed(2)}, over the $${TRADE_MAX_USD} cap per tap. Nothing was bought.`);
   if (tradeBusy.has(id)) throw new Error("An order for this arb is already being sent. Wait a moment.");
   tradeBusy.add(id);
   let filled = 0, notional = 0, spent = 0, stop = "";
