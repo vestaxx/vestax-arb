@@ -81,13 +81,20 @@ function breakEvenPrice(goatedOdds: number) {
   if (disc < 0) return 0;
   return ((1 + FEE) - Math.sqrt(disc)) / (2 * FEE);
 }
-function readFill(res: any): { shares: number; longPx: number | null; orderId: string | null } {
-  let shares = 0, notional = 0, orderId: string | null = null;
+function readFill(res: any): { shares: number; longPx: number | null; orderId: string | null; status: string | null; reason: string | null } {
+  let shares = 0, notional = 0, orderId: string | null = null, status: string | null = null, reason: string | null = null;
   const num = (v: any) => { const x = Number(typeof v === "object" && v ? v.value : v); return Number.isFinite(x) ? x : null; };
   const walk = (n: any) => {
     if (Array.isArray(n)) return n.forEach(walk);
     if (!n || typeof n !== "object") return;
     orderId ??= n.id ?? n.orderId ?? null;
+    // "nothing more was available at or below the limit" (zero shares, px already inside our own
+    // ceiling) has been happening on 41/46 attempts this week, every one of them live basketball --
+    // readFill previously discarded everything except fills themselves, so there was no way to tell
+    // a genuine zero-liquidity IOC cancel apart from a rejection, a status flag, or anything else the
+    // response actually says about why. Keep whatever status/reason-shaped field shows up, once.
+    status ??= n.status ?? n.orderStatus ?? n.state ?? null;
+    reason ??= n.rejectReason ?? n.reject_reason ?? n.cancelReason ?? n.cancel_reason ?? n.reason ?? n.message ?? null;
     for (const k of ["executions", "fills"]) {
       if (Array.isArray(n[k])) for (const f of n[k]) {
         const q = num(f?.lastShares ?? f?.last_shares);
@@ -98,7 +105,7 @@ function readFill(res: any): { shares: number; longPx: number | null; orderId: s
     for (const v of Object.values(n)) if (v && typeof v === "object") walk(v);
   };
   walk(res);
-  return { shares, longPx: shares > 0 ? notional / shares : null, orderId };
+  return { shares, longPx: shares > 0 ? notional / shares : null, orderId, status, reason };
 }
 async function tradeQuote(slug: string, long: boolean): Promise<number | null> {
   const d = (await pm.markets.bbo(slug))?.marketData;
@@ -230,7 +237,11 @@ async function trade(body: any) {
         // the exchange is expected to honor the slippage band above, but if a fill still lands beyond
         // the ceiling, stop immediately rather than risking it again on a further chunk
         if (paid > ceiling + 0.0005) { stop = `a fill landed at ${(paid * 100).toFixed(2)}c, past the ${(ceiling * 100).toFixed(2)}c limit -- stopped`; break; }
-      } else { stop = "nothing more was available at or below the limit"; break; }
+      } else {
+        stop = "nothing more was available at or below the limit";
+        console.log(`ZERO-FILL-DIAG slug=${slug} px=${px} ceiling=${ceiling} bips=${bips} cash=${cash.toFixed(2)} status=${JSON.stringify(f.status)} reason=${JSON.stringify(f.reason)} orderId=${f.orderId}`);
+        break;
+      }
       if (more()) await Bun.sleep(150);
     }
   } catch (e: any) {
@@ -1117,6 +1128,15 @@ async function refreshPolymarket() {
         // event verbatim to settle it with real data instead of another inference from aggregate counts.
         if (/nill.*wyom|wyom.*nill/i.test(String(ev.slug ?? "") + String(ev.title ?? ""))) {
           console.log(`NIU-WYO-EVENT-DIAG slug=${JSON.stringify(ev.slug)} title=${JSON.stringify(ev.title)} markets=${JSON.stringify(ev.markets ?? [])}`);
+        }
+        // live bug report: the bot bought a Bovada moneyline for a SPECIFIC game against what looks
+        // like a Polymarket SERIES-winner market (opp_key dated 2026-10-16, league showed as "MLB
+        // ALCS & NLCS Series Prices", but the matched Bovada game's own start_time was 2026-10-18) --
+        // trading is killed while this is confirmed, but the bad catalogue match itself is still
+        // sitting in pmNameGames/pmGames right now and needs the exact type/title fields to fix for
+        // real rather than guess from the NAME_BAD regex list.
+        if (/tb.*cle|cle.*tb|tampa.*cleveland|rays.*guardians/i.test(String(ev.slug ?? "") + String(ev.title ?? ""))) {
+          console.log(`TBCLE-EVENT-DIAG slug=${JSON.stringify(ev.slug)} title=${JSON.stringify(ev.title)} markets=${JSON.stringify(ev.markets ?? [])}`);
         }
         let picked = false;
         const teamMk: any[] = [];
