@@ -136,6 +136,7 @@ async function placeBuy(slug: string, long: boolean, cash: number, p0: number, b
 }
 async function trade(body: any) {
   if (!TRADE_ON || !trader) throw new Error("One-tap buying is switched off.");
+  if (await checkCircuitBreaker()) throw new Error(`Trading is automatically paused -- too many recent hedge attempts failed to fill. Check your notifications, then POST /api/breaker/reset to resume.`);
   const id = Number(body?.id);
   if (!Number.isInteger(id)) throw new Error("bad id");
   const mode: "quote" | "buy" | "force" = body?.mode === "buy" || body?.mode === "force" ? body.mode : "quote";
@@ -370,6 +371,46 @@ function alertArb(a: { key: string; pct: number; sport: string; league: string; 
   acts.push(`view, Arbs page, ${PAGE_URL}`);
   void ntfy(`ARB ${a.pct.toFixed(1)}% ${a.sport}${a.live ? " LIVE" : ""}`, body, "high", a.gtUrl || a.pmUrl, acts.join("; "));
 }
+// ---------- circuit breaker ----------
+// What we can actually see in real time is whether a hedge attempt filled, not whether a bet later
+// settles correctly -- that settlement visibility gap (tennis retirements, boxing no-shows, Goated
+// voiding a leg) isn't something a check like this can close; it has to stay a decision about which
+// sports to auto-trade unattended, not an engineering problem. What repeated fill failures DO
+// reliably signal is a systemic matching/pricing problem in progress (exactly what happened with the
+// live-basketball zero-fills tonight: 41 of 46 attempts filled nothing). So this breaker watches for
+// that pattern specifically -- several hedge attempts in a row failing to get meaningfully filled --
+// and pauses trading automatically rather than let a bad pattern repeat all night unattended.
+const BREAKER_CONSEC_FAILS = Number(Bun.env.ARB_BREAKER_FAILS ?? 5);
+const BREAKER_WINDOW_MIN = Number(Bun.env.ARB_BREAKER_WINDOW_MIN ?? 30);
+const BREAKER_FILL_OK = 0.5; // a leg filled at least half of what was wanted counts as "worked"
+let breakerTripped = false, breakerCheckedAt = 0, breakerCheckedCache = false;
+async function checkCircuitBreaker(): Promise<boolean> {
+  if (breakerTripped) return true;
+  if (Date.now() - breakerCheckedAt < 5000) return breakerCheckedCache; // avoid a DB hit on every single trade() call
+  breakerCheckedAt = Date.now();
+  const rows = await sql`SELECT filled_shares, wanted_shares FROM arb_trades
+    WHERE created_at > now() - interval '1 minute' * ${BREAKER_WINDOW_MIN}
+    ORDER BY created_at DESC LIMIT 20`;
+  let consec = 0;
+  for (const r of rows as any[]) {
+    const wanted = Number(r.wanted_shares ?? 0), filled = Number(r.filled_shares ?? 0);
+    const ok = wanted > 0 && filled / wanted >= BREAKER_FILL_OK;
+    if (ok) break;
+    consec++;
+  }
+  breakerCheckedCache = consec >= BREAKER_CONSEC_FAILS;
+  if (breakerCheckedCache && !breakerTripped) {
+    breakerTripped = true;
+    await ntfy(
+      "🛑 Trading paused automatically",
+      `${consec} hedge attempts in a row filled under ${Math.round(BREAKER_FILL_OK * 100)}% within the last ${BREAKER_WINDOW_MIN} minutes. One-tap buying is disabled until you re-enable it (POST /api/breaker/reset, or redeploy).`,
+      "max"
+    );
+    console.log(`BREAKER-TRIPPED consec=${consec} window=${BREAKER_WINDOW_MIN}m`);
+  }
+  return breakerCheckedCache;
+}
+
 const SUSPICIOUS_PCT = Number(Bun.env.ARB_SUSPICIOUS_PCT ?? 8);
 // Safety-net audit for the two bug classes found and fixed on 2026-10-17 (a stale-liquidity fallback
 // that let a near-empty Polymarket order book through, and a percentage sanity cap that only applied
@@ -588,8 +629,20 @@ async function refreshGoated() {
 }
 (async () => { while (true) { try { await refreshGoated(); } catch (e: any) { console.error("goated catalogue refresh failed", e?.message ?? e); } await Bun.sleep(5000); } })();
 
+let gtWinnerFallbackDiagN = 0;
 function gtWinnerFrom(mk: any[], ev: any): Record<string, number> | null {
-  const w = mk.find((x: any) => x.id === ev.sport.winnerId) ?? mk.find((x: any) => /^winner/i.test(x.title ?? ""));
+  // confirmed live bug: when the primary winnerId lookup misses for a sport/league, the fallback
+  // below used to grab ANY market titled "Winner..." with no check at all for whether it was
+  // actually the full-game market -- a "Winner - 2nd Quarter" title matches /^winner/i just as well
+  // as the real one, and silently paired a full-game Polymarket moneyline against a Goated bet that
+  // only cares who wins one quarter. Excluding period-qualified titles here closes that specific gap.
+  const PERIOD_TITLE = /half|quarter|period|1st|2nd|3rd|4th|set|map|inning|overtime|\bot\b|extra/i;
+  const byId = mk.find((x: any) => x.id === ev.sport.winnerId);
+  const w = byId ?? mk.find((x: any) => /^winner/i.test(x.title ?? "") && !PERIOD_TITLE.test(String(x.title ?? "")));
+  if (!byId && w && gtWinnerFallbackDiagN < 20) {
+    gtWinnerFallbackDiagN++;
+    console.log(`GT-WINNER-FALLBACK #${gtWinnerFallbackDiagN} sport=${ev.sport.name} league=${ev.league ?? "?"} winnerId=${ev.sport.winnerId} matched title=${JSON.stringify(w.title)} id=${w.id}`);
+  }
   if (!w) return null;
   const sels = (w.selectionGroups ?? []).flatMap((g: any) => g.selections ?? []);
   if (sels.length !== 2) return null;
@@ -1900,7 +1953,7 @@ async function arbs() {
     FROM arb_opps WHERE active AND last_seen > now() - interval '3 minutes'
     ORDER BY profit_pct DESC LIMIT 100`;
   const [s] = await sql`SELECT last_scan, compared, best_pct, best_label, closest_json FROM arb_status WHERE id = 1`;
-  return { rows, status: s ?? null, now: new Date().toISOString(), feeds: { bet105: feedLive("bet105").length, bovada: feedLive("bovada").length, gemini: feedLive("gemini").length }, trade: { enabled: TRADE_ON && !!trader, maxUsd: TRADE_MAX_USD, forcePct: Math.round((FORCE_MULT - 1) * 100) } };
+  return { rows, status: s ?? null, now: new Date().toISOString(), feeds: { bet105: feedLive("bet105").length, bovada: feedLive("bovada").length, gemini: feedLive("gemini").length }, trade: { enabled: TRADE_ON && !!trader, maxUsd: TRADE_MAX_USD, forcePct: Math.round((FORCE_MULT - 1) * 100), breakerTripped } };
 }
 const authed = (req: Request) => {
   if (!KEY) return false;
@@ -2024,7 +2077,7 @@ Bun.serve({
     const url = new URL(req.url);
     const isPost = req.method === "POST";
     if (req.method !== "GET" && req.method !== "HEAD" && !isPost) return new Response("Method not allowed", { status: 405 });
-    if (isPost && !url.pathname.startsWith("/api/tracker") && url.pathname !== "/api/trade" && url.pathname !== "/api/scan" && url.pathname !== "/api/b105" && url.pathname !== "/api/dexsport-debug") return new Response("Method not allowed", { status: 405 });
+    if (isPost && !url.pathname.startsWith("/api/tracker") && url.pathname !== "/api/trade" && url.pathname !== "/api/scan" && url.pathname !== "/api/b105" && url.pathname !== "/api/dexsport-debug" && url.pathname !== "/api/breaker/reset") return new Response("Method not allowed", { status: 405 });
     const sec = { "x-content-type-options": "nosniff", "x-frame-options": "DENY", "referrer-policy": "no-referrer", "x-robots-tag": "noindex, nofollow" };
     if (isPost && url.pathname === "/api/b105") {
       if (!B105_TOKEN || req.headers.get("x-b105-token") !== B105_TOKEN) return Response.json({ error: "locked" }, { status: 401, headers: sec });
@@ -2055,7 +2108,8 @@ Bun.serve({
       try {
         const body = await req.json();
         let out: any;
-        if (url.pathname === "/api/tracker") out = await trackerAdd(body);
+        if (url.pathname === "/api/breaker/reset") { breakerTripped = false; breakerCheckedAt = 0; out = { ok: true, breakerTripped }; }
+        else if (url.pathname === "/api/tracker") out = await trackerAdd(body);
         else if (url.pathname === "/api/tracker/settle") out = await trackerSettle(body);
         else if (url.pathname === "/api/tracker/delete") out = await trackerDelete(body);
         else if (url.pathname === "/api/trade") out = await trade(body);
