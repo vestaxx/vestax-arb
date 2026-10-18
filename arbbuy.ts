@@ -91,35 +91,53 @@ export function makeArbBuy(d: Deps) {
     if (Date.now() - (recent.get(key) ?? 0) < 60000) throw new Error("This arb was just bought. Wait a minute before buying it again.");
     busy.add(id); recent.set(key, Date.now());
     try {
-      const goatedP = (async () => {
+      // 1) Goated goes FIRST. If it says no, Polymarket is never touched, so nothing is left exposed.
+      let gOk = false, gErr = "", gUnknown = false;
+      try {
         const r = await fetch(`${BETTOR_URL}/bet`, {
           method: "POST", headers: { "content-type": "application/json", "x-bettor-key": BETTOR_KEY },
           body: JSON.stringify({ selection: sel, amount: sg }), signal: AbortSignal.timeout(30000),
         });
         const j: any = await r.json().catch(() => ({}));
-        let ok = false, err = String(j?.error ?? "");
+        gErr = String(j?.error ?? "");
         if (typeof j?.success === "boolean") { // the VPS reads Goated's full reply and tells us directly
-          ok = j.success; if (!ok) err = String(j?.error || err || "bet rejected");
+          gOk = j.success; if (!gOk) gErr = String(j?.error || gErr || "bet rejected");
         } else { // older VPS version: its reply was cut at 2000 chars, so a good bet could look unreadable
-          try { const e = JSON.parse(String(j?.raw ?? ""))?.data?.[0]; ok = e?.success === true; if (!ok) err = String(e?.error ?? err ?? "bet rejected"); } catch { if (!err) err = "unreadable reply from Goated (it may still have been placed -- check Goated)"; }
+          try { const e = JSON.parse(String(j?.raw ?? ""))?.data?.[0]; gOk = e?.success === true; if (!gOk) gErr = String(e?.error ?? gErr ?? "bet rejected"); }
+          catch { gUnknown = true; gErr = gErr || "unreadable reply from Goated (it may still have been placed -- check Goated)"; }
         }
-        return { ok, err };
-      })();
-      const pmP = d.trade({ ...tradeBody, mode: "buy" });
-      const [g, p] = await Promise.allSettled([goatedP, pmP]);
+      } catch (e: any) {
+        gUnknown = true; gErr = String(e?.message ?? e) + " (the Goated bet may or may not have been placed -- check Goated)";
+      }
 
-      const gOk = g.status === "fulfilled" && g.value.ok;
-      const gErr = g.status === "rejected" ? String((g.reason as any)?.message ?? g.reason) : g.value.err;
-      const pm: any = p.status === "fulfilled" ? p.value : null;
-      const pmErr = p.status === "rejected" ? String((p.reason as any)?.message ?? p.reason) : String(pm?.stop ?? "");
-      const pmFilled = Number(pm?.filled ?? 0), pmDone = !!pm?.done;
+      // 2) Only if Goated accepted: buy the Polymarket hedge. Goated is already placed, so being hedged matters more
+      //    than the last cent: if the normal buy doesn't complete, retry once with the wider "force" price ceiling.
+      let pm: any = { filled: 0, costEst: 0, done: false, stop: "" };
+      if (gOk) {
+        const step = async (mode: "buy" | "force") => {
+          try { return await d.trade({ ...tradeBody, mode }); }
+          catch (e: any) {
+            const msg = String(e?.message ?? e);
+            return /already fully hedged/i.test(msg) ? { done: true, filled: 0, costEst: 0, stop: "" } : { done: false, filled: 0, costEst: 0, stop: msg };
+          }
+        };
+        const a1: any = await step("buy");
+        let tot = { filled: Number(a1.filled ?? 0), cost: Number(a1.costEst ?? 0), done: !!a1.done, stop: String(a1.stop ?? "") };
+        if (!tot.done) {
+          const a2: any = await step("force");
+          tot = { filled: tot.filled + Number(a2.filled ?? 0), cost: tot.cost + Number(a2.costEst ?? 0), done: !!a2.done, stop: String(a2.stop ?? tot.stop) };
+        }
+        pm = { filled: tot.filled, costEst: tot.cost, done: tot.done, stop: tot.stop };
+      }
+      const pmFilled = Number(pm.filled), pmDone = !!pm.done;
+      const pmErr = String(pm.stop || (gOk ? "" : "not attempted (Goated did not accept)"));
 
       if (gOk && !pmDone) {
         void d.ntfy(`Goated placed, Polymarket NOT fully hedged: ${plan.match}`,
           `Goated bet $${sg} on ${gPick} @ ${dGt} went through, but Polymarket filled only ${pmFilled.toFixed(2)} shares${pmErr ? " (" + pmErr + ")" : ""}. You are exposed -- finish the hedge by hand.`, "urgent");
-      } else if (!gOk && pmFilled > 0) {
-        void d.ntfy(`Polymarket filled, Goated FAILED: ${plan.match}`,
-          `Polymarket bought ${pmFilled.toFixed(2)} shares of ${pmPick} but the Goated bet failed: ${gErr}. You hold an unhedged Polymarket position.`, "urgent");
+      } else if (gUnknown) {
+        void d.ntfy(`Goated bet status unclear: ${plan.match}`,
+          `Could not confirm whether the Goated bet ($${sg} on ${gPick}) was placed: ${gErr}. Polymarket was NOT bought. Check Goated bet history.`, "urgent");
       }
       let tracked = false;
       if (gOk && pmDone && pmFilled > 0) {
@@ -133,7 +151,7 @@ export function makeArbBuy(d: Deps) {
         } catch (e: any) { console.error("arb-buy tracker failed:", e?.message ?? e); }
       }
       console.log(`ARB-BUY id=${id} goated=${gOk ? "ok" : "FAIL " + gErr} pm=${pmFilled.toFixed(2)}sh ${pmDone ? "done" : "partial/fail " + pmErr} tracked=${tracked}`);
-      return { plan, goated: { ok: gOk, error: gOk ? null : gErr }, polymarket: { filledShares: pmFilled, done: pmDone, error: pmErr || null }, tracked };
+      return { plan, goated: { ok: gOk, error: gOk ? null : gErr }, polymarket: { filledShares: pmFilled, done: pmDone, error: pmDone ? null : (pmErr || null) }, tracked };
     } finally {
       busy.delete(id);
     }
@@ -166,6 +184,12 @@ export function makeArbBuy(d: Deps) {
         if (!row) return;
         note(`trying ${key} at ${pct.toFixed(1)}%`);
         const r: any = await arbBuy({ id: row.id, bankroll: AUTO_BANK, dry: false, triggeredBy: "auto" });
+        const nothingPlaced = !r?.goated?.ok && !(Number(r?.polymarket?.filledShares ?? 0) > 0) && !/may (still )?have been placed|may or may not|unclear|unreadable/i.test(String(r?.goated?.error ?? ""));
+        if (nothingPlaced) { // Goated said no before any money moved: harmless, just wait a bit before trying this arb again
+          note(`${r?.plan?.match ?? key}: Goated said no (${String(r?.goated?.error ?? "").slice(0, 80)}), nothing bought`);
+          autoLast.set(key, Date.now() + 40000);
+          return;
+        }
         const clean = r?.goated?.ok && r?.polymarket?.done;
         note(`${r?.plan?.match ?? key}: Goated ${r?.goated?.ok ? "ok" : "FAILED"}, Polymarket ${r?.polymarket?.done ? "done" : "NOT done"}`);
         if (!clean) {
@@ -214,6 +238,7 @@ d.log.forEach(function(x){var e=document.createElement("div");e.textContent=new 
 function loadStatus(){fetch("/api/auto").then(function(r){return r.json()}).then(show).catch(function(){$("s").textContent="Could not load. Are you logged in?";});}
 $("b").onclick=function(){this.disabled=true;fetch("/api/tracker/auto",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({on:!cur})}).then(function(r){return r.json()}).then(show).catch(loadStatus);};
 function summ(j){if(j.error)return "Not bought: "+j.error;var p=j.plan||{},g=j.goated||{},m=j.polymarket||{};
+if(!g.ok&&!(m.filledShares>0))return "Nothing was bought. Goated said no: "+g.error;
 return "Goated $"+(p.goated?p.goated.stake:"?")+" @ "+(p.goated?p.goated.odds:"?")+": "+(g.ok?"OK":"FAILED ("+g.error+")")+"\\nPolymarket $"+(p.polymarket?p.polymarket.cash:"?")+": "+(m.done?"OK":"NOT FULLY FILLED"+(m.error?" ("+m.error+")":""))+(j.tracked?"\\nLogged to tracker.":"");}
 function buy(id,btn,out){if(busy[id])return;busy[id]=true;btn.disabled=true;btn.textContent="Buying...";out.textContent="";
 fetch("/api/tracker/arb-buy",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({id:id,bankroll:bank,dry:false})})
