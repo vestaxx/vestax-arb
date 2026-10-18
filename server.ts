@@ -1914,6 +1914,7 @@ async function scan(): Promise<number> {
             const rowPm = { book: "polymarket", odds: dPm, liq: dp.depth || null };
             const rowGt = { book: bk, odds: dGt, liq: null };
                         if (bk === "goated") { const gc = j.ge.comps.find((c: any) => c.id === leg.other); if (gc) arbGoatedLegs.set(key, { slug: j.ge.slug, q: gc.q, name: gc.name, at: Date.now() }); }
+                        if (bk === "goated") void (arbBuy as any).autoTry?.(key, pct, !!j.live, String(j.ge.sport?.name ?? ""));
             const A = pmLong ? rowPm : rowGt, B = pmLong ? rowGt : rowPm;
             const uA = pmLong ? pmUrl : gtUrl, uB = pmLong ? gtUrl : pmUrl;
             const fs = await upsertArb({ key, sport: j.ge.sport.name, league: j.ge.league, market: "Moneyline", pa: j.L.description, pb: j.S.description, start: j.start, live: !!j.live, A, B, pct, uA, uB });
@@ -2147,6 +2148,7 @@ Bun.serve({
         else if (url.pathname === "/api/tracker/delete") out = await trackerDelete(body);
         else if (url.pathname === "/api/trade") out = await trade(body);
                   else if (url.pathname === "/api/tracker/arb-buy") out = await arbBuy(body);
+                  else if (url.pathname === "/api/tracker/auto") out = await (arbBuy as any).autoSet(body);
         else if (url.pathname === "/api/scan") out = await scanShots(body);
         else return Response.json({ error: "not found" }, { status: 404, headers: sec });
         return Response.json(out, { headers: { "cache-control": "no-store", ...sec } });
@@ -2166,6 +2168,8 @@ Bun.serve({
       const ok = await ntfy("VeSTAX ARBS test alert", "Test alert: if you can read this, phone alerts are working.", "default", PAGE_URL, `view, Arbs page, ${PAGE_URL}`);
       return Response.json({ sent: ok, topicSet: !!NTFY_TOPIC }, { headers: { "cache-control": "no-store", ...sec } });
     }    if (url.pathname === "/api/goated-probe") return goatedProbeRoute(url, sec, gtEvents, gt);
+    if (url.pathname === "/auto") return new Response((arbBuy as any).autoPage, { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", ...sec } });
+    if (url.pathname === "/api/auto") return Response.json(await (arbBuy as any).autoStatus(), { headers: { "cache-control": "no-store", ...sec } });
     if (url.pathname !== "/") return new Response("Not found", { status: 404, headers: sec });
     const html = await getPage();
     if (!html) return new Response("The page is not available right now. Refresh in a moment.", { status: 503, headers: { "content-type": "text/plain; charset=utf-8", ...sec } });
