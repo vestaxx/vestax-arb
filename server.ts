@@ -4,6 +4,7 @@ import { SQL } from "bun";
 import { PolymarketUS } from "polymarket-us";
 import { makeArbBuy } from "./arbbuy";
 const arbGoatedLegs = new Map<string, any>();
+const arbBovadaLegs = new Map<string, any>();
 import { goatedProbeRoute } from "./goated-probe";
 const sql = new SQL({ url: Bun.env.DATABASE_URL!, max: 3, idleTimeout: 30 });
 const KEY = Bun.env.ARB_KEY ?? "";
@@ -721,7 +722,7 @@ async function gtMarkets(ev: any): Promise<{ winner: Record<string, number> | nu
   return { winner: gtWinnerFrom(mk, ev), totals: team ? gtTotalsFrom(mk) : (new Map() as GtTot), hand: team ? gtHandicapFrom(mk) : [] };
 }
 
-type FeedEv = { teams: [string, string]; spreads: { team: string; line: number; odds: number }[]; totals: { line: number; over?: number; under?: number }[]; ml: Record<string, number>; live: boolean; start?: number; url?: string; link?: string; league?: string; sport?: string; mapMl?: Record<number, Record<string, number>> };
+type FeedEv = { teams: [string, string]; spreads: { team: string; line: number; odds: number }[]; totals: { line: number; over?: number; under?: number }[]; ml: Record<string, number>; live: boolean; start?: number; url?: string; link?: string; league?: string; sport?: string; mapMl?: Record<number, Record<string, number>>; mlIds?: Record<string, string> };
 const feeds: Record<string, Map<string, { at: number; ev: FeedEv }>> = { bet105: new Map(), bovada: new Map(), gemini: new Map() };
 const FEED_BOOKS = ["bet105", "bovada", "gemini"];
 // bovada's non-live TTL was 30000 -- a third of bet105's and well under gemini's, despite all three
@@ -869,7 +870,7 @@ function bvdCollect(ev: any, live: boolean, teams: string[], alt: boolean, out: 
           for (const o of outs) { const dc = bvdNum(o?.price?.decimal); if (dc > 1 && teams.includes(String(o.description))) bucket[String(o.description)] = dc; }
           continue;
         }
-        for (const o of outs) { const dc = bvdNum(o?.price?.decimal); if (dc > 1 && teams.includes(String(o.description))) out.ml[String(o.description)] = dc; }
+        for (const o of outs) { const dc = bvdNum(o?.price?.decimal); if (dc > 1 && teams.includes(String(o.description))) { out.ml[String(o.description)] = dc; (out.mlIds ??= {})[String(o.description)] = String(o.id ?? ""); } }
       } else if (/2W-HCAP|spread|handicap|run line|puck line/i.test(kd)) {
         for (const o of outs) {
           const dc = bvdNum(o?.price?.decimal), h = bvdNum(o?.price?.handicap);
@@ -1915,6 +1916,7 @@ async function scan(): Promise<number> {
             const rowGt = { book: bk, odds: dGt, liq: null };
                         if (bk === "goated") { const gc = j.ge.comps.find((c: any) => c.id === leg.other); if (gc) arbGoatedLegs.set(key, { slug: j.ge.slug, q: gc.q, name: gc.name, at: Date.now() }); }
                         if (bk === "goated") void (arbBuy as any).autoTry?.(key, pct, !!j.live, String(j.ge.sport?.name ?? ""));
+                        if (bk === "bovada") { const bc = j.ge.comps.find((c: any) => c.id === leg.other); const oid = bc && j.feed?.mlIds?.[bc.name]; if (bc && oid) { arbBovadaLegs.set(key, { outcomeId: String(oid), name: bc.name, at: Date.now() }); void (arbBuy as any).autoTry?.(key, pct, !!j.live, String(j.ge.sport?.name ?? "")); } }
             const A = pmLong ? rowPm : rowGt, B = pmLong ? rowGt : rowPm;
             const uA = pmLong ? pmUrl : gtUrl, uB = pmLong ? gtUrl : pmUrl;
             const fs = await upsertArb({ key, sport: j.ge.sport.name, league: j.ge.league, market: "Moneyline", pa: j.L.description, pb: j.S.description, start: j.start, live: !!j.live, A, B, pct, uA, uB });
@@ -2105,7 +2107,7 @@ input{width:100%;box-sizing:border-box;background:#0b0d12;color:#e8e8ea;border:1
 button{margin-top:12px;width:100%;padding:12px;border:0;border-radius:999px;background:#2e5cff;color:#fff;font-weight:700;font-size:1rem}</style></head>
 <body><form method="GET" action="/"><img src="/logo.png" alt=""/><h1>VeSTAX ARBS</h1>
 <input name="key" type="password" placeholder="Passcode" autocomplete="current-password"/><button>Enter</button></form></body></html>`;
-const arbBuy = makeArbBuy({ sql, trade, tradeQuote, pmDecimal, wholePair, ntfy, trackerAdd, legs: arbGoatedLegs });
+const arbBuy = makeArbBuy({ sql, trade, tradeQuote, pmDecimal, wholePair, ntfy, trackerAdd, legs: arbGoatedLegs, bvdLegs: arbBovadaLegs });
 Bun.serve({
   port: Number(Bun.env.PORT ?? 3000),
   async fetch(req) {
