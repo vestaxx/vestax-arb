@@ -429,7 +429,7 @@
     vxBuyBusy[id] = true; b.disabled = true;
     const r0 = rows.find((x) => x.id === id);
     const match = r0 ? r0.player_a + " vs " + r0.player_b : "this arb";
-    vxShow("Buying...", match + "\nGoated first, then Polymarket. Please wait.", 0);
+    vxShow("Buying...", match + "\nThe sportsbook goes first, then Polymarket. Please wait.", 0);
     try {
       const bank = Math.max(2, Math.round(Number($("bank").value) || 5));
       const resp = await fetch("/api/tracker/arb-buy", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: id, bankroll: bank, dry: false }) });
@@ -437,7 +437,7 @@
       if (j.error) { vxShow("Not bought", match + "\n" + j.error, 20000); }
       else {
         const p = j.plan || {}, g = j.goated || {}, m = j.polymarket || {};
-        const lines = match + "\nGoated $" + (p.goated ? p.goated.stake : "?") + " @ " + (p.goated ? p.goated.odds : "?") + ": " + (g.ok ? "placed" : "NOT placed (" + g.error + ")") +
+        const lines = match + "\n" + (p.book || "Goated") + " $" + (p.goated ? p.goated.stake : "?") + " @ " + (p.goated ? p.goated.odds : "?") + ": " + (g.ok ? "placed" : "NOT placed (" + g.error + ")") +
           "\nPolymarket $" + (p.polymarket ? p.polymarket.cash : "?") + ": " + (m.done ? "bought" : (m.filledShares > 0 ? "PARTIAL " + Number(m.filledShares).toFixed(2) + " sh" : "not bought")) + (m.error ? " (" + m.error + ")" : "") + (j.tracked ? "\nLogged to the tracker." : "");
         if (g.ok && m.done) vxShow("Both legs placed", lines, 25000);
         else if (!g.ok && !(m.filledShares > 0)) vxShow("Nothing was bought", lines, 25000);
@@ -605,9 +605,9 @@
     const badge = url && /^https:[/][/]/.test(url)
       ? '<a class="odds" href="' + esc(url) + '" target="_blank" rel="noopener noreferrer" title="Open this game on ' + esc(label) + '"' + pmAttr + '>' + inner + '</a>'
       : '<span class="odds" title="' + esc(label) + '">' + inner + '</span>';
-    // Goated-vs-Polymarket card: tapping the Goated badge buys BOTH legs from the server (Goated first, then Polymarket), no window opens
-    const buyBadge = (book === "goated" && pmPairId)
-      ? '<button type="button" class="odds vxbuy" data-vxbuy="' + pmPairId + '" title="Buy BOTH sides now: Goated first, then Polymarket. Nothing opens.">' +
+    // Goated/Bovada-vs-Polymarket card: tapping the sportsbook badge buys BOTH legs from the server (sportsbook first, then Polymarket), no window opens
+    const buyBadge = ((book === "goated" || book === "bovada") && pmPairId)
+      ? '<button type="button" class="odds vxbuy" data-vxbuy="' + pmPairId + '" title="Buy BOTH sides now: ' + esc(label) + ' first, then Polymarket. Nothing opens.">' +
         '<span class="logo lg-' + esc(book) + '">' + abbr + '</span>' + amer(odds) + '<span class="go">⚡</span></button>'
       : null;
     // a plain, inert link -- the raw site URL with no #vx=... job payload and no data-goated-pm
@@ -675,7 +675,7 @@
     if (!side) return;
     const book = side === "a" ? r.book_a : r.book_b;
     const other = side === "a" ? r.book_b : r.book_a;
-    if (book === "goated" && other === "polymarket") return; // the server-side auto-fire handles these now, so this page must not also buy them
+    if ((book === "goated" || book === "bovada") && other === "polymarket") return; // the server-side auto-fire handles these now, so this page must not also buy them
     const isPair = other === "polymarket" || SPORTBOOKS.has(other);
     if (!isPair || autoClicked.has(r.id) || vxPend[r.id]) return;
     // once per real-world event, not just once per specific arb row -- the same match can independently
@@ -754,7 +754,7 @@
       const profit = Math.min(sa * r.odds_a, sb * r.odds_b) - sa - sb;
       const isManual = !!manualStake[r.id];
       const fresh = Date.now() - Date.parse(r.first_seen) < 6e4;
-      const isGoatedPm = (r.book_a === "goated" && r.book_b === "polymarket") || (r.book_b === "goated" && r.book_a === "polymarket");
+      const isGoatedPm = ((r.book_a === "goated" || r.book_a === "bovada") && r.book_b === "polymarket") || ((r.book_b === "goated" || r.book_b === "bovada") && r.book_a === "polymarket"); // Goated OR Bovada vs Polymarket
       const pmPairId = (tradeOn && r.id && isGoatedPm) ? r.id : null;
       return '<article class="card"><div class="top">' +
         '<div class="pct"><b>' + r.profit_pct.toFixed(2) + '%</b><span class="pill">~' + usd(profit) + '</span>' + (isManual ? '<span class="tag other">MANUAL</span>' : '') + '<button type="button" class="editbtn" data-editopen="' + r.id + '" title="Edit the stake for a bet you already placed">✎</button></div>' +

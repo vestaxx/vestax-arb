@@ -11,6 +11,7 @@ type Deps = {
   ntfy: (title: string, body: string, priority?: string) => Promise<boolean>;
   trackerAdd: (b: any) => Promise<any>;
   legs: Map<string, any>; // arb key -> which Goated game/outcome that arb's Goated leg is, filled in by the scanner
+  bvdLegs: Map<string, any>; // same for Bovada arbs: arb key -> the Bovada outcome id to bet
 };
 
 const BETTOR_URL = (Bun.env.BETTOR_URL ?? "").replace(/\/+$/, "");
@@ -42,23 +43,34 @@ export function makeArbBuy(d: Deps) {
     const [row]: any = await sql`SELECT opp_key, sport, league, player_a, player_b, profit_pct FROM arb_opps WHERE id = ${id} AND active`;
     if (!row) throw new Error("That arb isn't active any more.");
     const key = String(row.opp_key);
-    const m = /^([^|~]+)\|([ab])$/.exec(key);
-    if (!m) throw new Error("Only Goated-vs-Polymarket moneyline arbs can be bought this way.");
+    const m = /^([^|~]+)\|([ab])(~bvd)?$/.exec(key);
+    if (!m) throw new Error("Only Goated-vs-Polymarket and Bovada-vs-Polymarket moneyline arbs can be bought this way.");
     const pmSlug = m[1], long = m[2] === "a";
+    const book = m[3] ? "bovada" : "goated", BK = book === "bovada" ? "Bovada" : "Goated";
     // Polymarket nets opposite sides of the same market, so buying the other side of a game you already hold
     // would cancel the hedge you bought before. Same rule auto-fire already follows.
-    const [flip]: any = await sql`SELECT 1 AS x FROM arb_trades WHERE opp_key = ${pmSlug + "|" + (long ? "b" : "a")} AND filled_shares > 0 AND created_at > now() - interval '12 hours' LIMIT 1`;
+    const [flip]: any = await sql`SELECT 1 AS x FROM arb_trades WHERE opp_key LIKE ${pmSlug + "|" + (long ? "b" : "a") + "%"} AND filled_shares > 0 AND created_at > now() - interval '12 hours' LIMIT 1`;
     if (flip) throw new Error("You already bought the opposite side of this game on Polymarket. Polymarket nets opposite sides, so this would cancel that hedge. Nothing was bought.");
-    const leg = d.legs.get(key);
-    if (!leg || Date.now() - leg.at > 120000) throw new Error("No fresh Goated details for this arb yet. Wait a few seconds for the next scan and try again.");
+    const leg = (book === "bovada" ? d.bvdLegs : d.legs).get(key);
+    if (!leg || Date.now() - leg.at > 120000) throw new Error(`No fresh ${BK} details for this arb yet. Wait a few seconds for the next scan and try again.`);
 
-    // fresh Goated odds + ids, read from the VPS at click time
-    const qs = new URLSearchParams({ slug: String(leg.slug), q: String(leg.q ?? ""), name: String(leg.name ?? "") });
-    const sr = await fetch(`${BETTOR_URL}/selection?${qs}`, { headers: { "x-bettor-key": BETTOR_KEY }, signal: AbortSignal.timeout(20000) });
-    const sel: any = await sr.json().catch(() => ({}));
-    if (!sr.ok || sel?.error) throw new Error("Goated lookup failed: " + String(sel?.error ?? sr.status));
-    const dGt = Number(sel.odds);
-    if (!(dGt > 1)) throw new Error("Goated has no usable price for that outcome right now.");
+    // fresh sportsbook price (and, for Goated, the ids), read from the VPS at click time
+    let sel: any, dGt: number;
+    if (book === "bovada") {
+      const pr = await fetch(`${BETTOR_URL}/bvd-price?outcomeId=${encodeURIComponent(String(leg.outcomeId))}`, { headers: { "x-bettor-key": BETTOR_KEY }, signal: AbortSignal.timeout(20000) });
+      const pj: any = await pr.json().catch(() => ({}));
+      if (!pr.ok || pj?.error) throw new Error("Bovada lookup failed: " + String(pj?.error ?? pr.status));
+      if (pj.http !== 200 || pj.status !== "AVAILABLE") throw new Error(`Bovada says that price is not available right now (${pj.status || "HTTP " + pj.http}).`);
+      sel = { name: leg.name };
+      dGt = Number(pj.price);
+    } else {
+      const qs = new URLSearchParams({ slug: String(leg.slug), q: String(leg.q ?? ""), name: String(leg.name ?? "") });
+      const sr = await fetch(`${BETTOR_URL}/selection?${qs}`, { headers: { "x-bettor-key": BETTOR_KEY }, signal: AbortSignal.timeout(20000) });
+      sel = await sr.json().catch(() => ({}));
+      if (!sr.ok || sel?.error) throw new Error("Goated lookup failed: " + String(sel?.error ?? sr.status));
+      dGt = Number(sel.odds);
+    }
+    if (!(dGt > 1)) throw new Error(`${BK} has no usable price for that outcome right now.`);
 
     // fresh Polymarket price
     const p0 = await d.tradeQuote(pmSlug, long);
@@ -72,7 +84,7 @@ export function makeArbBuy(d: Deps) {
     const [sg, sp] = w; // sg = Goated stake, sp = Polymarket cash
     if (sg < 1 || sp < 1) throw new Error("Stakes came out under $1. Try a bigger bankroll.");
 
-    // check the Polymarket leg is buyable at these exact numbers BEFORE touching Goated
+    // check the Polymarket leg is buyable at these exact numbers BEFORE touching the sportsbook
     const tradeBody: any = { id, cash: sp, stake: sg, payout: sg * dGt };
     if (body?.triggeredBy === "auto") tradeBody.triggeredBy = "auto"; // manual clicks stay untagged so the per-tap cap still applies
     const q: any = await d.trade({ ...tradeBody, mode: "quote" });
@@ -81,7 +93,7 @@ export function makeArbBuy(d: Deps) {
     const pmPick = long ? row.player_a : row.player_b;
     const gPick = String(sel.name || leg.name);
     const plan = {
-      dry, match: `${row.player_a} vs ${row.player_b}`, goated: { pick: gPick, stake: sg, odds: dGt },
+      dry, book: BK, match: `${row.player_a} vs ${row.player_b}`, goated: { pick: gPick, stake: sg, odds: dGt }, // 'goated' is the sportsbook leg, whichever book it is
       polymarket: { pick: pmPick, cash: sp, priceCents: Math.round(p0 * 1000) / 10 }, edgePct: Math.round(pct * 100) / 100,
       expectedProfitUsd: Math.round((q.profitNow ?? 0) * 100) / 100, bankroll,
     };
@@ -91,23 +103,23 @@ export function makeArbBuy(d: Deps) {
     if (Date.now() - (recent.get(key) ?? 0) < 60000) throw new Error("This arb was just bought. Wait a minute before buying it again.");
     busy.add(id); recent.set(key, Date.now());
     try {
-      // 1) Goated goes FIRST. If it says no, Polymarket is never touched, so nothing is left exposed.
+      // 1) The sportsbook (Goated or Bovada) goes FIRST. If it says no, Polymarket is never touched, so nothing is left exposed.
       let gOk = false, gErr = "", gUnknown = false;
       try {
-        const r = await fetch(`${BETTOR_URL}/bet`, {
+        const r = await fetch(`${BETTOR_URL}${book === "bovada" ? "/bvd-bet" : "/bet"}`, {
           method: "POST", headers: { "content-type": "application/json", "x-bettor-key": BETTOR_KEY },
-          body: JSON.stringify({ selection: sel, amount: sg }), signal: AbortSignal.timeout(30000),
+          body: JSON.stringify(book === "bovada" ? { outcomeId: String(leg.outcomeId), amount: sg } : { selection: sel, amount: sg }), signal: AbortSignal.timeout(book === "bovada" ? 45000 : 30000),
         });
         const j: any = await r.json().catch(() => ({}));
         gErr = String(j?.error ?? "");
         if (typeof j?.success === "boolean") { // the VPS reads Goated's full reply and tells us directly
-          gOk = j.success; if (!gOk) gErr = String(j?.error || gErr || "bet rejected");
+          gOk = j.success; if (!gOk) { gErr = String(j?.error || gErr || "bet rejected"); if (j?.unknown) gUnknown = true; }
         } else { // older VPS version: its reply was cut at 2000 chars, so a good bet could look unreadable
           try { const e = JSON.parse(String(j?.raw ?? ""))?.data?.[0]; gOk = e?.success === true; if (!gOk) gErr = String(e?.error ?? gErr ?? "bet rejected"); }
           catch { gUnknown = true; gErr = gErr || "unreadable reply from Goated (it may still have been placed -- check Goated)"; }
         }
       } catch (e: any) {
-        gUnknown = true; gErr = String(e?.message ?? e) + " (the Goated bet may or may not have been placed -- check Goated)";
+        gUnknown = true; gErr = String(e?.message ?? e) + ` (the ${BK} bet may or may not have been placed -- check ${BK})`;
       }
 
       // 2) Only if Goated accepted: buy the Polymarket hedge. Goated is already placed, so being hedged matters more
@@ -130,14 +142,14 @@ export function makeArbBuy(d: Deps) {
         pm = { filled: tot.filled, costEst: tot.cost, done: tot.done, stop: tot.stop };
       }
       const pmFilled = Number(pm.filled), pmDone = !!pm.done;
-      const pmErr = String(pm.stop || (gOk ? "" : "not attempted (Goated did not accept)"));
+      const pmErr = String(pm.stop || (gOk ? "" : `not attempted (${BK} did not accept)`));
 
       if (gOk && !pmDone) {
-        void d.ntfy(`Goated placed, Polymarket NOT fully hedged: ${plan.match}`,
-          `Goated bet $${sg} on ${gPick} @ ${dGt} went through, but Polymarket filled only ${pmFilled.toFixed(2)} shares${pmErr ? " (" + pmErr + ")" : ""}. You are exposed -- finish the hedge by hand.`, "urgent");
+        void d.ntfy(`${BK} placed, Polymarket NOT fully hedged: ${plan.match}`,
+          `${BK} bet $${sg} on ${gPick} @ ${dGt} went through, but Polymarket filled only ${pmFilled.toFixed(2)} shares${pmErr ? " (" + pmErr + ")" : ""}. You are exposed -- finish the hedge by hand.`, "urgent");
       } else if (gUnknown) {
-        void d.ntfy(`Goated bet status unclear: ${plan.match}`,
-          `Could not confirm whether the Goated bet ($${sg} on ${gPick}) was placed: ${gErr}. Polymarket was NOT bought. Check Goated bet history.`, "urgent");
+        void d.ntfy(`${BK} bet status unclear: ${plan.match}`,
+          `Could not confirm whether the ${BK} bet ($${sg} on ${gPick}) was placed: ${gErr}. Polymarket was NOT bought. Check ${BK} bet history.`, "urgent");
       }
       let tracked = false;
       if (gOk && pmDone && pmFilled > 0) {
@@ -145,12 +157,12 @@ export function makeArbBuy(d: Deps) {
           await d.trackerAdd({
             event: plan.match, sport: row.sport, league: row.league,
             a: { book: "polymarket", pick: pmPick, stake: pm.costEst, payout: pmFilled },
-            b: { book: "goated", pick: gPick, stake: sg, payout: sg * dGt },
+            b: { book, pick: gPick, stake: sg, payout: sg * dGt },
           });
           tracked = true;
         } catch (e: any) { console.error("arb-buy tracker failed:", e?.message ?? e); }
       }
-      console.log(`ARB-BUY id=${id} goated=${gOk ? "ok" : "FAIL " + gErr} pm=${pmFilled.toFixed(2)}sh ${pmDone ? "done" : "partial/fail " + pmErr} tracked=${tracked}`);
+      console.log(`ARB-BUY id=${id} ${BK.toLowerCase()}=${gOk ? "ok" : "FAIL " + gErr} pm=${pmFilled.toFixed(2)}sh ${pmDone ? "done" : "partial/fail " + pmErr} tracked=${tracked}`);
       return { plan, goated: { ok: gOk, error: gOk ? null : gErr }, polymarket: { filledShares: pmFilled, done: pmDone, error: pmDone ? null : (pmErr || null) }, tracked };
     } finally {
       busy.delete(id);
@@ -169,14 +181,14 @@ export function makeArbBuy(d: Deps) {
     try {
       if (!autoOn || !(pct >= AUTO_PCT)) return;
       if (AUTO_SKIP.test(sport) && !/table tennis/i.test(sport)) return;
-      const m = /^([^|~]+)\|([ab])$/.exec(key);
+      const m = /^([^|~]+)\|([ab])(~bvd)?$/.exec(key);
       if (!m) return;
       if (autoBusy.has(key) || Date.now() - (autoLast.get(key) ?? 0) < 20000) return; // don't hammer the same arb every scan
       autoLast.set(key, Date.now());
       autoBusy.add(key);
       try {
         // once per game, and never the opposite side of one already bought
-        const [done]: any = await sql`SELECT 1 AS x FROM arb_trades WHERE (opp_key = ${m[1] + "|a"} OR opp_key = ${m[1] + "|b"}) AND filled_shares > 0 AND created_at > now() - interval '12 hours' LIMIT 1`;
+        const [done]: any = await sql`SELECT 1 AS x FROM arb_trades WHERE opp_key LIKE ${m[1] + "|%"} AND filled_shares > 0 AND created_at > now() - interval '12 hours' LIMIT 1`;
         if (done) return;
         const [cnt]: any = await sql`SELECT count(*)::int AS n FROM arb_trades WHERE triggered_by = 'auto' AND filled_shares > 0 AND created_at > now() - interval '24 hours'`;
         if ((cnt?.n ?? 0) >= AUTO_MAX_PER_DAY) return;
@@ -186,15 +198,15 @@ export function makeArbBuy(d: Deps) {
         const r: any = await arbBuy({ id: row.id, bankroll: AUTO_BANK, dry: false, triggeredBy: "auto" });
         const nothingPlaced = !r?.goated?.ok && !(Number(r?.polymarket?.filledShares ?? 0) > 0) && !/may (still )?have been placed|may or may not|unclear|unreadable/i.test(String(r?.goated?.error ?? ""));
         if (nothingPlaced) { // Goated said no before any money moved: harmless, just wait a bit before trying this arb again
-          note(`${r?.plan?.match ?? key}: Goated said no (${String(r?.goated?.error ?? "").slice(0, 80)}), nothing bought`);
+          note(`${r?.plan?.match ?? key}: ${r?.plan?.book ?? "Goated"} said no (${String(r?.goated?.error ?? "").slice(0, 80)}), nothing bought`);
           autoLast.set(key, Date.now() + 40000);
           return;
         }
         const clean = r?.goated?.ok && r?.polymarket?.done;
-        note(`${r?.plan?.match ?? key}: Goated ${r?.goated?.ok ? "ok" : "FAILED"}, Polymarket ${r?.polymarket?.done ? "done" : "NOT done"}`);
+        note(`${r?.plan?.match ?? key}: ${r?.plan?.book ?? "Goated"} ${r?.goated?.ok ? "ok" : "FAILED"}, Polymarket ${r?.polymarket?.done ? "done" : "NOT done"}`);
         if (!clean) {
           autoOn = false; // anything short of two clean legs stops auto-fire until you switch it back on
-          void d.ntfy("Auto-fire switched itself OFF", `The last auto-buy (${r?.plan?.match ?? key}) was not clean: Goated ${r?.goated?.ok ? "ok" : "failed (" + (r?.goated?.error ?? "?") + ")"}, Polymarket ${r?.polymarket?.done ? "done" : "incomplete"}. Check your positions, then switch it back on at the /auto page.`, "urgent");
+          void d.ntfy("Auto-fire switched itself OFF", `The last auto-buy (${r?.plan?.match ?? key}) was not clean: ${r?.plan?.book ?? "Goated"} ${r?.goated?.ok ? "ok" : "failed (" + (r?.goated?.error ?? "?") + ")"}, Polymarket ${r?.polymarket?.done ? "done" : "incomplete"}. Check your positions, then switch it back on at the /auto page.`, "urgent");
         }
       } finally {
         autoBusy.delete(key);
@@ -224,7 +236,7 @@ button{width:100%;border:0;border-radius:14px;font-weight:800;color:#fff}#b{padd
 .t{font-weight:700;font-size:1rem;margin-bottom:2px}.buy{background:#2e5cff;padding:16px;font-size:1.05rem;margin-top:10px}.buy:disabled{background:#3a4258}
 .out{white-space:pre-line;margin-top:8px;color:#cfd3dc;font-size:.88rem}.log div{padding:4px 0;border-bottom:1px solid #1b1e27}.log div:last-child{border:0}small{color:#7b8190}</style></head><body><main>
 <h1>VeSTAX</h1><button id="b" class="off" disabled>...</button><p id="s">Loading...</p>
-<h2>Goated vs Polymarket arbs</h2><p id="hint">Tap BUY to place both bets from here. Nothing opens.</p><div id="arbs">Loading...</div>
+<h2>Goated / Bovada vs Polymarket arbs</h2><p id="hint">Tap BUY to place both bets from here. Nothing opens.</p><div id="arbs">Loading...</div>
 <h2>Auto-fire</h2><div class="card" id="i"></div><div class="card log" id="l"></div>
 <script>
 var cur=false,bank=5,results={},busy={};
@@ -238,25 +250,73 @@ d.log.forEach(function(x){var e=document.createElement("div");e.textContent=new 
 function loadStatus(){fetch("/api/auto").then(function(r){return r.json()}).then(show).catch(function(){$("s").textContent="Could not load. Are you logged in?";});}
 $("b").onclick=function(){this.disabled=true;fetch("/api/tracker/auto",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({on:!cur})}).then(function(r){return r.json()}).then(show).catch(loadStatus);};
 function summ(j){if(j.error)return "Not bought: "+j.error;var p=j.plan||{},g=j.goated||{},m=j.polymarket||{};
-if(!g.ok&&!(m.filledShares>0))return "Nothing was bought. Goated said no: "+g.error;
-return "Goated $"+(p.goated?p.goated.stake:"?")+" @ "+(p.goated?p.goated.odds:"?")+": "+(g.ok?"OK":"FAILED ("+g.error+")")+"\\nPolymarket $"+(p.polymarket?p.polymarket.cash:"?")+": "+(m.done?"OK":"NOT FULLY FILLED"+(m.error?" ("+m.error+")":""))+(j.tracked?"\\nLogged to tracker.":"");}
+if(!g.ok&&!(m.filledShares>0))return "Nothing was bought. "+(p.book||"Goated")+" said no: "+g.error;
+return (p.book||"Goated")+" $"+(p.goated?p.goated.stake:"?")+" @ "+(p.goated?p.goated.odds:"?")+": "+(g.ok?"OK":"FAILED ("+g.error+")")+"\\nPolymarket $"+(p.polymarket?p.polymarket.cash:"?")+": "+(m.done?"OK":"NOT FULLY FILLED"+(m.error?" ("+m.error+")":""))+(j.tracked?"\\nLogged to tracker.":"");}
 function buy(id,btn,out){if(busy[id])return;busy[id]=true;btn.disabled=true;btn.textContent="Buying...";out.textContent="";
 fetch("/api/tracker/arb-buy",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({id:id,bankroll:bank,dry:false})})
 .then(function(r){return r.json()}).then(function(j){results[id]=summ(j)}).catch(function(e){results[id]="Network error: "+e})
 .then(function(){busy[id]=false;loadArbs();});}
 function card(r){var c=document.createElement("div");c.className="card";
 var t=document.createElement("div");t.className="t";t.textContent=r.player_a+" vs "+r.player_b;
-var m=document.createElement("small");m.textContent=(r.is_live?"LIVE | ":"")+r.sport+" | "+r.league+" | "+Number(r.profit_pct).toFixed(2)+"%";
+var m=document.createElement("small");m.textContent=(r.is_live?"LIVE | ":"")+(r.book_a==="polymarket"?r.book_b:r.book_a)+" | "+r.sport+" | "+r.league+" | "+Number(r.profit_pct).toFixed(2)+"%";
 var btn=document.createElement("button");btn.className="buy";var out=document.createElement("div");out.className="out";
 if(busy[r.id]){btn.disabled=true;btn.textContent="Buying...";}else{btn.textContent="BUY $"+bank+" (both legs)";}
 out.textContent=results[r.id]||"";btn.onclick=function(){buy(r.id,btn,out)};
 c.appendChild(t);c.appendChild(m);c.appendChild(btn);c.appendChild(out);return c;}
-function isGP(r){return r.market==="Moneyline"&&((r.book_a==="goated"&&r.book_b==="polymarket")||(r.book_b==="goated"&&r.book_a==="polymarket"));}
+function isGP(r){return r.market==="Moneyline"&&((r.book_a==="polymarket")!==(r.book_b==="polymarket"))&&(r.book_a==="goated"||r.book_b==="goated"||r.book_a==="bovada"||r.book_b==="bovada");}
 function loadArbs(){fetch("/api/arbs").then(function(r){return r.json()}).then(function(d){var el=$("arbs");el.innerHTML="";var list=(d.rows||[]).filter(isGP);
-if(!list.length){el.textContent="No Goated vs Polymarket arbs right now.";}list.forEach(function(r){el.appendChild(card(r));});})
+if(!list.length){el.textContent="No Goated or Bovada arbs vs Polymarket right now.";}list.forEach(function(r){el.appendChild(card(r));});})
 .catch(function(){$("arbs").textContent="Could not load arbs. Are you logged in?";});}
 loadStatus();loadArbs();setInterval(loadStatus,15000);setInterval(loadArbs,4000);
 </script></main></body></html>`;
 
-  return Object.assign(arbBuy, { autoTry, autoStatus, autoSet, autoPage });
+  // The same controls as /auto, as a floating panel that can be injected into the main arbs page without touching its own code.
+  const extrasJs = `(function(){
+if(window.__vxExtras)return;window.__vxExtras=1;
+var bank=5,cur=false,results={},busy={},isOpen=false,arbTimer=null;
+function el(t,c,x){var e=document.createElement(t);if(c)e.className=c;if(x!==undefined)e.textContent=x;return e;}
+var st=document.createElement("style");
+st.textContent="#vxf{position:fixed;right:14px;bottom:14px;z-index:2147483000;border:0;border-radius:999px;padding:14px 22px;font:800 15px system-ui,sans-serif;color:#fff;background:#c0392b;box-shadow:0 4px 18px rgba(0,0,0,.45)}#vxf.on{background:#1f9d55}"+
+"#vxp{position:fixed;left:8px;right:8px;bottom:70px;max-height:78vh;overflow:auto;z-index:2147483000;background:#0b0d12;color:#e8e8ea;border:1px solid #2a2e3a;border-radius:16px;padding:14px;font:14px system-ui,sans-serif;box-shadow:0 8px 30px rgba(0,0,0,.6)}"+
+"@media(min-width:700px){#vxp{left:auto;width:440px}}#vxp h3{margin:0 0 6px;font-size:16px}#vxp p{color:#9aa0ad;margin:4px 0}#vxp button{border:0;border-radius:12px;color:#fff;font-weight:800;width:100%}"+
+"#vxp .tg{padding:16px;font-size:15px;margin:8px 0;background:#c0392b}#vxp .tg.on{background:#1f9d55}#vxp .cd{background:#11141b;border:1px solid #23262f;border-radius:12px;padding:10px 12px;margin-top:8px}"+
+"#vxp .t{font-weight:700;margin-bottom:2px}#vxp .by{background:#2e5cff;padding:14px;font-size:15px;margin-top:8px}#vxp .by:disabled{background:#3a4258}#vxp .ot{white-space:pre-line;margin-top:6px;color:#cfd3dc;font-size:13px}#vxp small{color:#7b8190}#vxp .x{position:absolute;right:10px;top:8px;width:auto;background:none;font-size:18px;color:#9aa0ad}";
+document.head.appendChild(st);
+var fab=el("button",null,"BUY");fab.id="vxf";
+var pn=el("div");pn.id="vxp";pn.style.display="none";
+var xb=el("button","x","x");var ttl=el("h3",null,"VeSTAX buy");
+var tg=el("button","tg","...");tg.disabled=true;var sl=el("p",null,"Loading...");
+var h2=el("h3",null,"Goated / Bovada vs Polymarket arbs");var hint=el("p",null,"Tap BUY to place both bets from here. The sportsbook goes first.");
+var list=el("div",null,"Loading...");var info=el("p");
+[xb,ttl,tg,sl,h2,hint,list,info].forEach(function(n){pn.appendChild(n);});
+document.body.appendChild(pn);document.body.appendChild(fab);
+function show(d){cur=!!d.on;bank=d.bankroll||bank;tg.disabled=false;tg.className="tg"+(cur?" on":"");fab.className=cur?"on":"";
+tg.textContent=cur?"AUTO-FIRE IS ON (tap to turn off)":"AUTO-FIRE IS OFF (tap to turn on)";
+sl.textContent=cur?"Buying by itself on Goated vs Polymarket moneyline arbs.":"Nothing will be bought by itself.";
+info.textContent="Auto-fire: "+d.minPct+"% or better, $"+d.bankroll+" per buy, max "+d.perDayCap+" per 24h. Done in last 24h: "+(d.todayCount===null?"?":d.todayCount)+"."+(d.log&&d.log[0]?" Last: "+d.log[0].text:"");}
+function loadStatus(){fetch("/api/auto").then(function(r){return r.json()}).then(show).catch(function(){sl.textContent="Could not load. Are you logged in?";});}
+tg.onclick=function(){tg.disabled=true;fetch("/api/tracker/auto",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({on:!cur})}).then(function(r){return r.json()}).then(show).catch(loadStatus);};
+function summ(j){if(j.error)return "Not bought: "+j.error;var p=j.plan||{},g=j.goated||{},m=j.polymarket||{};
+if(!g.ok&&!(m.filledShares>0))return "Nothing was bought. "+(p.book||"Goated")+" said no: "+g.error;
+return (p.book||"Goated")+" $"+(p.goated?p.goated.stake:"?")+" @ "+(p.goated?p.goated.odds:"?")+": "+(g.ok?"OK":"FAILED ("+g.error+")")+"\\nPolymarket $"+(p.polymarket?p.polymarket.cash:"?")+": "+(m.done?"OK":"NOT FULLY FILLED"+(m.error?" ("+m.error+")":""))+(j.tracked?"\\nLogged to tracker.":"");}
+function buy(id,btn,out){if(busy[id])return;busy[id]=true;btn.disabled=true;btn.textContent="Buying...";out.textContent="";
+fetch("/api/tracker/arb-buy",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({id:id,bankroll:bank,dry:false})})
+.then(function(r){return r.json()}).then(function(j){results[id]=summ(j)}).catch(function(e){results[id]="Network error: "+e})
+.then(function(){busy[id]=false;loadArbs();});}
+function card(r){var c=el("div","cd");c.appendChild(el("div","t",r.player_a+" vs "+r.player_b));
+c.appendChild(el("small",null,(r.is_live?"LIVE | ":"")+(r.book_a==="polymarket"?r.book_b:r.book_a)+" | "+r.sport+" | "+r.league+" | "+Number(r.profit_pct).toFixed(2)+"%"));
+var b=el("button","by");var o=el("div","ot",results[r.id]||"");
+if(busy[r.id]){b.disabled=true;b.textContent="Buying...";}else{b.textContent="BUY $"+bank+" (both legs)";}
+b.onclick=function(){buy(r.id,b,o)};c.appendChild(b);c.appendChild(o);return c;}
+function isGP(r){return r.market==="Moneyline"&&((r.book_a==="polymarket")!==(r.book_b==="polymarket"))&&(r.book_a==="goated"||r.book_b==="goated"||r.book_a==="bovada"||r.book_b==="bovada");}
+function loadArbs(){fetch("/api/arbs").then(function(r){return r.json()}).then(function(d){list.innerHTML="";var a=(d.rows||[]).filter(isGP);
+if(!a.length){list.textContent="No Goated or Bovada arbs vs Polymarket right now.";}a.forEach(function(r){list.appendChild(card(r));});})
+.catch(function(){list.textContent="Could not load arbs. Are you logged in?";});}
+function toggle(v){isOpen=v;pn.style.display=v?"block":"none";fab.textContent=v?"CLOSE":"BUY";
+if(v){loadStatus();loadArbs();arbTimer=setInterval(loadArbs,4000);}else if(arbTimer){clearInterval(arbTimer);arbTimer=null;}}
+fab.onclick=function(){toggle(!isOpen)};xb.onclick=function(){toggle(false)};
+loadStatus();setInterval(loadStatus,20000);
+})();`;
+
+  return Object.assign(arbBuy, { autoTry, autoStatus, autoSet, autoPage, extrasJs });
 }
