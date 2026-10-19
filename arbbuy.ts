@@ -31,6 +31,9 @@ export function makeArbBuy(d: Deps) {
   const { sql } = d;
   const recent = new Map<string, number>();
   const busy = new Set<number>();
+  // Bovada answers "not logged in" when its login has expired: tell the phone once, and have auto-fire stop retrying for a while
+  let bvdLoginBadUntil = 0, bvdLoginAlertAt = 0;
+  const isLoginErr = (e: string) => /NotLoggedIn|Please log in|log in to place/i.test(e);
 
   async function arbBuy(body: any) {
     const id = Number(body?.id);
@@ -122,6 +125,17 @@ export function makeArbBuy(d: Deps) {
         gUnknown = true; gErr = String(e?.message ?? e) + ` (the ${BK} bet may or may not have been placed -- check ${BK})`;
       }
 
+      if (book === "bovada") {
+        if (gOk) bvdLoginBadUntil = 0;
+        else if (isLoginErr(gErr)) {
+          bvdLoginBadUntil = Date.now() + 15 * 60 * 1000;
+          if (Date.now() - bvdLoginAlertAt > 30 * 60 * 1000) {
+            bvdLoginAlertAt = Date.now();
+            void d.ntfy("Bovada login expired", `Bovada says you are not logged in, so Bovada arbs cannot be bought (first seen on ${plan.match}). On the VPS run: setbovada  and paste a fresh Authorization value from Bovada.`, "urgent");
+          }
+        }
+      }
+
       // 2) Only if Goated accepted: buy the Polymarket hedge. Goated is already placed, so being hedged matters more
       //    than the last cent: if the normal buy doesn't complete, retry once with the wider "force" price ceiling.
       let pm: any = { filled: 0, costEst: 0, done: false, stop: "" };
@@ -183,6 +197,7 @@ export function makeArbBuy(d: Deps) {
       if (AUTO_SKIP.test(sport) && !/table tennis/i.test(sport)) return;
       const m = /^([^|~]+)\|([ab])(~bvd)?$/.exec(key);
       if (!m) return;
+      if (m[3] && Date.now() < bvdLoginBadUntil) return; // Bovada's login is expired: no retrying every minute until it has been fixed
       if (autoBusy.has(key) || Date.now() - (autoLast.get(key) ?? 0) < 20000) return; // don't hammer the same arb every scan
       autoLast.set(key, Date.now());
       autoBusy.add(key);

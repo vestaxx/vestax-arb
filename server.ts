@@ -5,7 +5,7 @@ import { PolymarketUS } from "polymarket-us";
 import { makeArbBuy } from "./arbbuy";
 const arbGoatedLegs = new Map<string, any>();
 const arbBovadaLegs = new Map<string, any>();
-import { goatedProbeRoute } from "./goated-probe";
+
 const sql = new SQL({ url: Bun.env.DATABASE_URL!, max: 3, idleTimeout: 30 });
 const KEY = Bun.env.ARB_KEY ?? "";
 const UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36";
@@ -499,8 +499,19 @@ function alertCross(key: string, pct: number, sport: string, matchup: string, li
 }
 
 const pairKey = (a: string, b: string) => [a, b].sort().join("-");
-async function gt(path: string) {
+// confirmed live: Goated is rate-limiting us with 429s on a large fraction of tournament fetches
+// every single refresh cycle (every ~240s, refreshGoated blasts all ~112 tournaments at once with
+// only 4-way concurrency and no backoff) -- the old behavior just logged the 429 and permanently
+// dropped that tournament's events for the whole cycle, which is why the catalogue was flickering
+// between a tiny, inconsistent subset of sports refresh to refresh instead of holding steady.
+// Retrying a 429 after a short wait, honoring Retry-After if Goated sends one, is the direct fix.
+async function gt(path: string, attempt = 0): Promise<any> {
   const r = await fetch(GT + path, { headers: { "user-agent": UA, accept: "application/json" } });
+  if (r.status === 429 && attempt < 3) {
+    const ra = Number(r.headers.get("retry-after"));
+    await Bun.sleep(Number.isFinite(ra) && ra > 0 ? ra * 1000 : 800 * (attempt + 1));
+    return gt(path, attempt + 1);
+  }
   if (!r.ok) throw new Error(`goated ${r.status} ${path}`);
   return (await r.json())?.data;
 }
@@ -1914,9 +1925,9 @@ async function scan(): Promise<number> {
             const pmLong = leg.side === "a";
             const rowPm = { book: "polymarket", odds: dPm, liq: dp.depth || null };
             const rowGt = { book: bk, odds: dGt, liq: null };
-                        if (bk === "goated") { const gc = j.ge.comps.find((c: any) => c.id === leg.other); if (gc) arbGoatedLegs.set(key, { slug: j.ge.slug, q: gc.q, name: gc.name, at: Date.now() }); }
-                        if (bk === "goated") void (arbBuy as any).autoTry?.(key, pct, !!j.live, String(j.ge.sport?.name ?? ""));
-                        if (bk === "bovada") { const bc = j.ge.comps.find((c: any) => c.id === leg.other); const oid = bc && j.feed?.mlIds?.[bc.name]; if (bc && oid) { arbBovadaLegs.set(key, { outcomeId: String(oid), name: bc.name, at: Date.now() }); void (arbBuy as any).autoTry?.(key, pct, !!j.live, String(j.ge.sport?.name ?? "")); } }
+            if (bk === "goated") { const gc = j.ge.comps.find((c: any) => c.id === leg.other); if (gc) arbGoatedLegs.set(key, { slug: j.ge.slug, q: gc.q, name: gc.name, at: Date.now() }); }
+            if (bk === "goated") void (arbBuy as any).autoTry?.(key, pct, !!j.live, String(j.ge.sport?.name ?? ""));
+            if (bk === "bovada") { const bc = j.ge.comps.find((c: any) => c.id === leg.other); const oid = bc && j.feed?.mlIds?.[bc.name]; if (bc && oid) { arbBovadaLegs.set(key, { outcomeId: String(oid), name: bc.name, at: Date.now() }); void (arbBuy as any).autoTry?.(key, pct, !!j.live, String(j.ge.sport?.name ?? "")); } }
             const A = pmLong ? rowPm : rowGt, B = pmLong ? rowGt : rowPm;
             const uA = pmLong ? pmUrl : gtUrl, uB = pmLong ? gtUrl : pmUrl;
             const fs = await upsertArb({ key, sport: j.ge.sport.name, league: j.ge.league, market: "Moneyline", pa: j.L.description, pb: j.S.description, start: j.start, live: !!j.live, A, B, pct, uA, uB });
@@ -2107,6 +2118,7 @@ input{width:100%;box-sizing:border-box;background:#0b0d12;color:#e8e8ea;border:1
 button{margin-top:12px;width:100%;padding:12px;border:0;border-radius:999px;background:#2e5cff;color:#fff;font-weight:700;font-size:1rem}</style></head>
 <body><form method="GET" action="/"><img src="/logo.png" alt=""/><h1>VeSTAX ARBS</h1>
 <input name="key" type="password" placeholder="Passcode" autocomplete="current-password"/><button>Enter</button></form></body></html>`;
+
 const arbBuy = makeArbBuy({ sql, trade, tradeQuote, pmDecimal, wholePair, ntfy, trackerAdd, legs: arbGoatedLegs, bvdLegs: arbBovadaLegs });
 Bun.serve({
   port: Number(Bun.env.PORT ?? 3000),
@@ -2150,8 +2162,8 @@ Bun.serve({
         else if (url.pathname === "/api/tracker/settle") out = await trackerSettle(body);
         else if (url.pathname === "/api/tracker/delete") out = await trackerDelete(body);
         else if (url.pathname === "/api/trade") out = await trade(body);
-                  else if (url.pathname === "/api/tracker/arb-buy") out = await arbBuy(body);
-                  else if (url.pathname === "/api/tracker/auto") out = await (arbBuy as any).autoSet(body);
+        else if (url.pathname === "/api/tracker/arb-buy") out = await arbBuy(body);
+        else if (url.pathname === "/api/tracker/auto") out = await (arbBuy as any).autoSet(body);
         else if (url.pathname === "/api/scan") out = await scanShots(body);
         else return Response.json({ error: "not found" }, { status: 404, headers: sec });
         return Response.json(out, { headers: { "cache-control": "no-store", ...sec } });
@@ -2170,7 +2182,7 @@ Bun.serve({
     if (url.pathname === "/api/test-alert") {
       const ok = await ntfy("VeSTAX ARBS test alert", "Test alert: if you can read this, phone alerts are working.", "default", PAGE_URL, `view, Arbs page, ${PAGE_URL}`);
       return Response.json({ sent: ok, topicSet: !!NTFY_TOPIC }, { headers: { "cache-control": "no-store", ...sec } });
-    }    if (url.pathname === "/api/goated-probe") return goatedProbeRoute(url, sec, gtEvents, gt);
+    }
     if (url.pathname === "/auto") return new Response((arbBuy as any).autoPage, { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", ...sec } });
     if (url.pathname === "/api/auto") return Response.json(await (arbBuy as any).autoStatus(), { headers: { "cache-control": "no-store", ...sec } });
     if (url.pathname !== "/") return new Response("Not found", { status: 404, headers: sec });
