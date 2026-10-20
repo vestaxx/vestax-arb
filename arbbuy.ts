@@ -22,7 +22,16 @@ const MIN_PCT = Number(Bun.env.ARB_BUY_MIN_PCT ?? 0.5); // refuse if the fresh p
 
 // ---- auto-fire settings (OFF after every restart unless ARB_AUTO=1; the /auto page switches it on and off) ----
 const AUTO_PCT = Number(Bun.env.ARB_AUTO_PCT ?? 5); // only arbs at or above this edge fire by themselves
-const AUTO_BANK = Number(Bun.env.ARB_AUTO_BANKROLL ?? DEFAULT_BANK);
+// Auto-fire sizes every buy off a $100 bankroll (about $40-60 on each side) and is allowed to exceed the usual per-click cap to do it.
+const AUTO_BANK = Number(Bun.env.ARB_AUTO_BANKROLL ?? 100);
+// Table tennis arbs: auto-fire only buys them from 11 PM to 5 AM Pacific. The strategy bot trades table tennis on the same Polymarket account
+// from 6 AM to 10 PM (opposite sides would net against each other), so there is a one-hour gap on each side of it so nothing overlaps.
+// Even inside the window, an arb is skipped if the strategy bot still holds an open position on that market.
+// ARB_TT_NIGHT_ONLY=0 allows table tennis arbs all day; ARB_TT_START_HOUR / ARB_TT_END_HOUR move the window.
+const TT_NIGHT_ONLY = Bun.env.ARB_TT_NIGHT_ONLY !== "0";
+const TT_START_HOUR = Number(Bun.env.ARB_TT_START_HOUR ?? 23);
+const TT_END_HOUR = Number(Bun.env.ARB_TT_END_HOUR ?? 5);
+const ptHour = () => Number(new Intl.DateTimeFormat("en-US", { timeZone: "America/Los_Angeles", hour: "numeric", hourCycle: "h23" }).format(new Date()));
 const AUTO_MAX_PER_DAY = Number(Bun.env.ARB_AUTO_MAX_PER_DAY ?? 10); // most auto-buys in any 24 hours
 const AUTO_SKIP = /tennis|boxing|mma|ufc|darts/i; // settlement-rule mismatches on retirements/no-shows; table tennis is exempt below
 const ROUTINE = /isn't active|No fresh Goated|only .* edge|edge is only|no longer|above the break-even|already running|just bought|no open price|no usable price/i;
@@ -33,6 +42,9 @@ export function makeArbBuy(d: Deps) {
   const busy = new Set<number>();
   // Bovada answers "not logged in" when its login has expired: tell the phone once, and have auto-fire stop retrying for a while
   let bvdLoginBadUntil = 0, bvdLoginAlertAt = 0;
+  // Auto-fire only buys games that start within this many hours (or are already live). The scanner still lists everything.
+  const AUTO_MAX_HOURS = Number(Bun.env.ARB_AUTO_MAX_HOURS ?? 12);
+  const farNoted = new Map<string, number>();
   const isLoginErr = (e: string) => /NotLoggedIn|Please log in|log in to place/i.test(e);
 
   async function arbBuy(body: any) {
@@ -41,7 +53,9 @@ export function makeArbBuy(d: Deps) {
     if (!BETTOR_URL || !BETTOR_KEY) throw new Error("BETTOR_URL and BETTOR_KEY are not set on this service.");
     const dry = body?.dry !== false; // anything except an explicit dry:false is a dry run
     if (!dry && Bun.env.ARB_BUY_ON !== "1") throw new Error("Real buying is switched off. Set ARB_BUY_ON=1 on this service to allow it.");
-    const bankroll = Math.min(MAX_USD, Math.max(2, Math.round(Number(body?.bankroll ?? DEFAULT_BANK) || DEFAULT_BANK)));
+    // only auto-fire may raise the per-buy cap (never a tap on the page)
+    const capUsd = body?.triggeredBy === "auto" && Number(body?.maxUsd) > 0 ? Number(body.maxUsd) : MAX_USD;
+    const bankroll = Math.min(capUsd, Math.max(2, Math.round(Number(body?.bankroll ?? DEFAULT_BANK) || DEFAULT_BANK)));
 
     const [row]: any = await sql`SELECT opp_key, sport, league, player_a, player_b, profit_pct FROM arb_opps WHERE id = ${id} AND active`;
     if (!row) throw new Error("That arb isn't active any more.");
@@ -195,6 +209,10 @@ export function makeArbBuy(d: Deps) {
     try {
       if (!autoOn || !(pct >= AUTO_PCT)) return;
       if (AUTO_SKIP.test(sport) && !/table tennis/i.test(sport)) return;
+      const isTT = /table tennis/i.test(sport);
+      const hr = ptHour();
+      const inTtWindow = hr >= TT_START_HOUR || hr < TT_END_HOUR;
+      if (isTT && TT_NIGHT_ONLY && !inTtWindow) return; // too close to the strategy bot's hours
       const m = /^([^|~]+)\|([ab])(~bvd)?$/.exec(key);
       if (!m) return;
       if (m[3] && Date.now() < bvdLoginBadUntil) return; // Bovada's login is expired: no retrying every minute until it has been fixed
@@ -205,12 +223,26 @@ export function makeArbBuy(d: Deps) {
         // once per game, and never the opposite side of one already bought
         const [done]: any = await sql`SELECT 1 AS x FROM arb_trades WHERE opp_key LIKE ${m[1] + "|%"} AND filled_shares > 0 AND created_at > now() - interval '12 hours' LIMIT 1`;
         if (done) return;
+        if (isTT) { // never take a side on a market the strategy bot is holding (Polymarket would net them)
+          const [held]: any = await sql`SELECT 1 AS x FROM live_trades l JOIN matches m ON m.id = l.match_id WHERE m.market_slug = ${m[1]} AND l.status = 'open' LIMIT 1`;
+          if (held) return;
+        }
         const [cnt]: any = await sql`SELECT count(*)::int AS n FROM arb_trades WHERE triggered_by = 'auto' AND filled_shares > 0 AND created_at > now() - interval '24 hours'`;
         if ((cnt?.n ?? 0) >= AUTO_MAX_PER_DAY) return;
-        const [row]: any = await sql`SELECT id FROM arb_opps WHERE opp_key = ${key} AND active`;
+        const [row]: any = await sql`SELECT id, start_time, is_live FROM arb_opps WHERE opp_key = ${key} AND active`;
         if (!row) return;
+        // too far ahead (or no known start time) -> don't auto-buy; your money would sit locked for days
+        const startMs = row.start_time ? new Date(row.start_time).getTime() : NaN;
+        const hoursAway = (startMs - Date.now()) / 3600e3;
+        if (!row.is_live && !(Number.isFinite(hoursAway) && hoursAway <= AUTO_MAX_HOURS)) {
+          if (Date.now() - (farNoted.get(key) ?? 0) > 6 * 3600e3) {
+            farNoted.set(key, Date.now());
+            note(`skipped ${key}: ${Number.isFinite(hoursAway) ? "starts in " + Math.round(hoursAway) + " h" : "no start time known"} (auto-fire only buys games starting within ${AUTO_MAX_HOURS} h)`);
+          }
+          return;
+        }
         note(`trying ${key} at ${pct.toFixed(1)}%`);
-        const r: any = await arbBuy({ id: row.id, bankroll: AUTO_BANK, dry: false, triggeredBy: "auto" });
+        const r: any = await arbBuy({ id: row.id, bankroll: AUTO_BANK, maxUsd: AUTO_BANK, dry: false, triggeredBy: "auto" });
         const nothingPlaced = !r?.goated?.ok && !(Number(r?.polymarket?.filledShares ?? 0) > 0) && !/may (still )?have been placed|may or may not|unclear|unreadable/i.test(String(r?.goated?.error ?? ""));
         if (nothingPlaced) { // Goated said no before any money moved: harmless, just wait a bit before trying this arb again
           note(`${r?.plan?.match ?? key}: ${r?.plan?.book ?? "Goated"} said no (${String(r?.goated?.error ?? "").slice(0, 80)}), nothing bought`);
