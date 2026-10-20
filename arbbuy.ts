@@ -221,15 +221,15 @@ export function makeArbBuy(d: Deps) {
       autoBusy.add(key);
       try {
         // once per game, and never the opposite side of one already bought
-        const [done]: any = await sql`SELECT 1 AS x FROM arb_trades WHERE opp_key LIKE ${m[1] + "|%"} AND filled_shares > 0 AND created_at > now() - interval '12 hours' LIMIT 1`;
-        if (done) return;
+        const [done]: any = await sql`SELECT 1 AS x FROM arb_trades WHERE opp_key LIKE ${m[1] + "|%"} AND filled_shares > 0 AND created_at > now() - interval '14 days' LIMIT 1`;
+        if (done) return; // this game was already bought (by auto-fire OR by a tap on the page), on either sportsbook
         if (isTT) { // never take a side on a market the strategy bot is holding (Polymarket would net them)
           const [held]: any = await sql`SELECT 1 AS x FROM live_trades l JOIN matches m ON m.id = l.match_id WHERE m.market_slug = ${m[1]} AND l.status = 'open' LIMIT 1`;
           if (held) return;
         }
         const [cnt]: any = await sql`SELECT count(*)::int AS n FROM arb_trades WHERE triggered_by = 'auto' AND filled_shares > 0 AND created_at > now() - interval '24 hours'`;
         if ((cnt?.n ?? 0) >= AUTO_MAX_PER_DAY) return;
-        const [row]: any = await sql`SELECT id, start_time, is_live FROM arb_opps WHERE opp_key = ${key} AND active`;
+        const [row]: any = await sql`SELECT id, start_time, is_live, player_a, player_b FROM arb_opps WHERE opp_key = ${key} AND active`;
         if (!row) return;
         // too far ahead (or no known start time) -> don't auto-buy; your money would sit locked for days
         const startMs = row.start_time ? new Date(row.start_time).getTime() : NaN;
@@ -241,6 +241,19 @@ export function makeArbBuy(d: Deps) {
           }
           return;
         }
+        // an arb you placed by hand and logged in the tracker (or any earlier buy logged there) counts too: same two names AND the same game.
+        // With a start time on the tracker row the game must start within 18 hours of this one (so a rematch next week isn't blocked);
+        // a row with no start time ("live bet") counts if it was logged in the last 4 days.
+        const startIso = Number.isFinite(startMs) ? new Date(startMs).toISOString() : new Date().toISOString();
+        const nameA = String(row.player_a ?? ""), nameB = String(row.player_b ?? "");
+        const [tracked]: any = await sql`SELECT 1 AS x FROM arb_tracker t
+          WHERE t.placed_at > now() - interval '14 days'
+            AND length(${nameA}) > 2 AND length(${nameB}) > 2
+            AND position(lower(${nameA}) in lower(t.event)) > 0 AND position(lower(${nameB}) in lower(t.event)) > 0
+            AND ( (t.event_start IS NOT NULL AND abs(extract(epoch from (t.event_start - ${startIso}::timestamptz))) < 64800)
+               OR (t.event_start IS NULL AND t.placed_at > now() - interval '4 days') )
+          LIMIT 1`;
+        if (tracked) return;
         note(`trying ${key} at ${pct.toFixed(1)}%`);
         const r: any = await arbBuy({ id: row.id, bankroll: AUTO_BANK, maxUsd: AUTO_BANK, dry: false, triggeredBy: "auto" });
         const nothingPlaced = !r?.goated?.ok && !(Number(r?.polymarket?.filledShares ?? 0) > 0) && !/may (still )?have been placed|may or may not|unclear|unreadable/i.test(String(r?.goated?.error ?? ""));
