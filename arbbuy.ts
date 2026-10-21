@@ -64,33 +64,37 @@ export function makeArbBuy(d: Deps) {
     if (!m) throw new Error("Only Goated-vs-Polymarket and Bovada-vs-Polymarket moneyline arbs can be bought this way.");
     const pmSlug = m[1], long = m[2] === "a";
     const book = m[3] ? "bovada" : "goated", BK = book === "bovada" ? "Bovada" : "Goated";
-    // Polymarket nets opposite sides of the same market, so buying the other side of a game you already hold
-    // would cancel the hedge you bought before. Same rule auto-fire already follows.
-    const [flip]: any = await sql`SELECT 1 AS x FROM arb_trades WHERE opp_key LIKE ${pmSlug + "|" + (long ? "b" : "a") + "%"} AND filled_shares > 0 AND created_at > now() - interval '12 hours' LIMIT 1`;
-    if (flip) throw new Error("You already bought the opposite side of this game on Polymarket. Polymarket nets opposite sides, so this would cancel that hedge. Nothing was bought.");
     const leg = (book === "bovada" ? d.bvdLegs : d.legs).get(key);
     if (!leg || Date.now() - leg.at > 120000) throw new Error(`No fresh ${BK} details for this arb yet. Wait a few seconds for the next scan and try again.`);
 
-    // fresh sportsbook price (and, for Goated, the ids), read from the VPS at click time
-    let sel: any, dGt: number;
-    if (book === "bovada") {
-      const pr = await fetch(`${BETTOR_URL}/bvd-price?outcomeId=${encodeURIComponent(String(leg.outcomeId))}`, { headers: { "x-bettor-key": BETTOR_KEY }, signal: AbortSignal.timeout(20000) });
-      const pj: any = await pr.json().catch(() => ({}));
-      if (!pr.ok || pj?.error) throw new Error("Bovada lookup failed: " + String(pj?.error ?? pr.status));
-      if (pj.http !== 200 || pj.status !== "AVAILABLE") throw new Error(`Bovada says that price is not available right now (${pj.status || "HTTP " + pj.http}).`);
-      sel = { name: leg.name };
-      dGt = Number(pj.price);
-    } else {
+    // Three things that don't depend on each other run AT THE SAME TIME, so the click waits for the slowest one instead of the sum:
+    //  - the sportsbook's fresh price (and, for Goated, the ids), read from the VPS
+    //  - the fresh Polymarket price
+    //  - the opposite-side check: Polymarket nets opposite sides of the same market, so buying the other side of a game you already hold
+    //    would cancel the hedge you bought before (same rule auto-fire follows)
+    const lookupSportsbook = async (): Promise<{ sel: any; dGt: number }> => {
+      if (book === "bovada") {
+        const pr = await fetch(`${BETTOR_URL}/bvd-price?outcomeId=${encodeURIComponent(String(leg.outcomeId))}`, { headers: { "x-bettor-key": BETTOR_KEY }, signal: AbortSignal.timeout(20000) });
+        const pj: any = await pr.json().catch(() => ({}));
+        if (!pr.ok || pj?.error) throw new Error("Bovada lookup failed: " + String(pj?.error ?? pr.status));
+        if (pj.http !== 200 || pj.status !== "AVAILABLE") throw new Error(`Bovada says that price is not available right now (${pj.status || "HTTP " + pj.http}).`);
+        return { sel: { name: leg.name }, dGt: Number(pj.price) };
+      }
       const qs = new URLSearchParams({ slug: String(leg.slug), q: String(leg.q ?? ""), name: String(leg.name ?? "") });
       const sr = await fetch(`${BETTOR_URL}/selection?${qs}`, { headers: { "x-bettor-key": BETTOR_KEY }, signal: AbortSignal.timeout(20000) });
-      sel = await sr.json().catch(() => ({}));
+      const sel: any = await sr.json().catch(() => ({}));
       if (!sr.ok || sel?.error) throw new Error("Goated lookup failed: " + String(sel?.error ?? sr.status));
-      dGt = Number(sel.odds);
-    }
+      return { sel, dGt: Number(sel.odds) };
+    };
+    const [flipRows, sb, p0]: any[] = await Promise.all([
+      sql`SELECT 1 AS x FROM arb_trades WHERE opp_key LIKE ${pmSlug + "|" + (long ? "b" : "a") + "%"} AND filled_shares > 0 AND created_at > now() - interval '12 hours' LIMIT 1`,
+      lookupSportsbook(),
+      d.tradeQuote(pmSlug, long),
+    ]);
+    if (flipRows?.[0]) throw new Error("You already bought the opposite side of this game on Polymarket. Polymarket nets opposite sides, so this would cancel that hedge. Nothing was bought.");
+    const sel: any = sb.sel;
+    const dGt: number = sb.dGt;
     if (!(dGt > 1)) throw new Error(`${BK} has no usable price for that outcome right now.`);
-
-    // fresh Polymarket price
-    const p0 = await d.tradeQuote(pmSlug, long);
     if (p0 == null) throw new Error("Polymarket has no open price for this market right now.");
     const dPm = d.pmDecimal(p0);
     const pct = (1 / (1 / dPm + 1 / dGt) - 1) * 100;
@@ -220,16 +224,19 @@ export function makeArbBuy(d: Deps) {
       autoLast.set(key, Date.now());
       autoBusy.add(key);
       try {
-        // once per game, and never the opposite side of one already bought
-        const [done]: any = await sql`SELECT 1 AS x FROM arb_trades WHERE opp_key LIKE ${m[1] + "|%"} AND filled_shares > 0 AND created_at > now() - interval '14 days' LIMIT 1`;
-        if (done) return; // this game was already bought (by auto-fire OR by a tap on the page), on either sportsbook
-        if (isTT) { // never take a side on a market the strategy bot is holding (Polymarket would net them)
-          const [held]: any = await sql`SELECT 1 AS x FROM live_trades l JOIN matches m ON m.id = l.match_id WHERE m.market_slug = ${m[1]} AND l.status = 'open' LIMIT 1`;
-          if (held) return;
-        }
-        const [cnt]: any = await sql`SELECT count(*)::int AS n FROM arb_trades WHERE triggered_by = 'auto' AND filled_shares > 0 AND created_at > now() - interval '24 hours'`;
-        if ((cnt?.n ?? 0) >= AUTO_MAX_PER_DAY) return;
-        const [row]: any = await sql`SELECT id, start_time, is_live, player_a, player_b FROM arb_opps WHERE opp_key = ${key} AND active`;
+        // These four database checks don't depend on each other, so they run together instead of one after another:
+        // once per game (never a second buy of it, by auto-fire OR a tap on the page, on either sportsbook), the strategy bot's
+        // open position on this market (table tennis only: Polymarket would net the sides), the daily auto-buy count, and the arb itself.
+        const [doneRows, heldRows, cntRows, rowRows]: any[] = await Promise.all([
+          sql`SELECT 1 AS x FROM arb_trades WHERE opp_key LIKE ${m[1] + "|%"} AND filled_shares > 0 AND created_at > now() - interval '14 days' LIMIT 1`,
+          isTT ? sql`SELECT 1 AS x FROM live_trades l JOIN matches m ON m.id = l.match_id WHERE m.market_slug = ${m[1]} AND l.status = 'open' LIMIT 1` : Promise.resolve([]),
+          sql`SELECT count(*)::int AS n FROM arb_trades WHERE triggered_by = 'auto' AND filled_shares > 0 AND created_at > now() - interval '24 hours'`,
+          sql`SELECT id, start_time, is_live, player_a, player_b FROM arb_opps WHERE opp_key = ${key} AND active`,
+        ]);
+        if (doneRows?.[0]) return;
+        if (isTT && heldRows?.[0]) return;
+        if ((cntRows?.[0]?.n ?? 0) >= AUTO_MAX_PER_DAY) return;
+        const row: any = rowRows?.[0];
         if (!row) return;
         // too far ahead (or no known start time) -> don't auto-buy; your money would sit locked for days
         const startMs = row.start_time ? new Date(row.start_time).getTime() : NaN;

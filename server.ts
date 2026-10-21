@@ -2065,6 +2065,93 @@ async function trackerDelete(b: any) {
   return { ok: true };
 }
 
+// ---- AUTO-SETTLE (start) ----
+// Every 15 minutes: look at the tracker arbs still marked open whose game has started, ask Polymarket whether that game's market has
+// resolved, and settle the card by itself (winner, money returned, settled time). It assumes the other book settled the same way as
+// Polymarket did, so anything unusual is left for you to settle by hand (and you get a phone alert saying so).
+const AUTO_SETTLE_MIN = Number(Bun.env.ARB_AUTO_SETTLE_MIN ?? 15);
+const AUTO_SETTLE_MAX_EDGE = Number(Bun.env.ARB_AUTO_SETTLE_MAX_EDGE ?? 8);
+const settleNoted = new Set<string>();
+let settleRunning = false;
+async function pmSettlementValue(slug: string): Promise<number | null> {
+  const read = (raw: any) => (raw !== undefined && raw !== null && raw !== "" && Number.isFinite(Number(raw)) ? Number(raw) : null);
+  try {
+    const v = read((await pm.markets.bbo(slug))?.marketData?.settlementPx?.value);
+    if (v !== null) return v;
+  } catch {}
+  try {
+    const s: any = await pm.markets.settlement?.(slug);
+    const v = read(s?.settlement?.value ?? s?.settlement);
+    if (v !== null) return v;
+  } catch {}
+  return null;
+}
+async function settleOpenArbs() {
+  if (settleRunning) return;
+  settleRunning = true;
+  let checked = 0, settled = 0;
+  try {
+    const open: any[] = await sql`SELECT id, placed_at, event, event_start, a_book, a_pick, a_stake, a_payout, b_book, b_pick, b_stake, b_payout FROM arb_tracker WHERE status = 'open' ORDER BY placed_at`;
+    for (const t of open) {
+      const refMs = t.event_start ? new Date(t.event_start).getTime() : new Date(t.placed_at).getTime();
+      if (t.event_start ? refMs > Date.now() : refMs + 20 * 60e3 > Date.now()) continue; // game hasn't started yet
+      const pmIsA = t.a_book === "polymarket", pmIsB = t.b_book === "polymarket";
+      if (!pmIsA && !pmIsB) continue; // no Polymarket leg to read a result from
+      checked++;
+      const refIso = new Date(refMs).toISOString(), placedIso = new Date(t.placed_at).toISOString();
+      // find the same game among the scanner's records to get its Polymarket market: same two names, and either the arb was on the scanner
+      // when you placed it, or its start time is within 2 days of this card's
+      const [o]: any = await sql`SELECT opp_key, player_a, player_b FROM arb_opps
+        WHERE length(player_a) > 2 AND length(player_b) > 2
+          AND position(lower(player_a) in lower(${String(t.event)})) > 0 AND position(lower(player_b) in lower(${String(t.event)})) > 0
+          AND ( (${placedIso}::timestamptz BETWEEN first_seen - interval '1 hour' AND last_seen + interval '1 hour')
+                OR abs(extract(epoch from (coalesce(start_time, first_seen) - ${refIso}::timestamptz))) < 172800 )
+        ORDER BY abs(extract(epoch from (last_seen - ${placedIso}::timestamptz))) LIMIT 1`;
+      if (!o) continue;
+      const slug = String(o.opp_key).split("|")[0];
+      const pk = String(pmIsA ? t.a_pick : t.b_pick).trim().toLowerCase(), na = String(o.player_a).trim().toLowerCase(), nb = String(o.player_b).trim().toLowerCase();
+      const pmLong = pk === na ? true : pk === nb ? false : (pk.includes(na) || na.includes(pk)) && !(pk.includes(nb) || nb.includes(pk)) ? true : (pk.includes(nb) || nb.includes(pk)) && !(pk.includes(na) || na.includes(pk)) ? false : null;
+      if (pmLong === null) continue;
+      const v = await pmSettlementValue(slug);
+      if (v === null) continue; // not resolved yet
+      const total = Number(t.a_stake) + Number(t.b_stake);
+      const edge = (Math.min(Number(t.a_payout), Number(t.b_payout)) / total - 1) * 100;
+      const noteOnce = (kind: string, title: string, body: string) => {
+        const k = kind + ":" + t.id;
+        if (!settleNoted.has(k)) { settleNoted.add(k); void ntfy(title, body, "high"); }
+      };
+      if (!(Math.abs(v - 1) < 0.01 || Math.abs(v) < 0.01)) {
+        noteOnce("void", `Settle by hand: ${t.event}`, `Polymarket resolved this at ${v} (not a clean win or loss, maybe a void). Check both books and settle the card yourself.`);
+        continue;
+      }
+      if (edge > AUTO_SETTLE_MAX_EDGE) {
+        noteOnce("edge", `Settle by hand: ${t.event}`, `Polymarket has resolved it, but this arb showed an unusually high ${edge.toFixed(1)}% edge, so I won't assume the other book agreed. Check it and settle the card yourself.`);
+        continue;
+      }
+      const pmWon = pmLong ? v >= 0.5 : v < 0.5;
+      const pmLetter = pmIsA ? "a" : "b", otherLetter = pmIsA ? "b" : "a";
+      const winner = pmWon ? pmLetter : otherLetter;
+      const returned = Number(winner === "a" ? t.a_payout : t.b_payout);
+      const winPick = String(winner === "a" ? t.a_pick : t.b_pick), winBook = String(winner === "a" ? t.a_book : t.b_book);
+      const res: any = await sql`UPDATE arb_tracker SET status = 'won', winner = ${winner}, returned = ${returned}, settled_at = now(),
+          note = coalesce(note || ' | ', '') || ${"auto-settled: Polymarket resolved " + (v >= 0.5 ? "side A" : "side B")}
+        WHERE id = ${t.id} AND status = 'open' RETURNING id`;
+      if (!res?.length) continue;
+      settled++;
+      const profit = returned - total;
+      void ntfy(`Settled: ${t.event}`, `${winPick} (${winBook}) won. Returned $${returned.toFixed(2)} on $${total.toFixed(2)}: ${profit >= 0 ? "profit +" : "loss -"}$${Math.abs(profit).toFixed(2)}. Settled automatically from Polymarket.`, "default");
+    }
+  } catch (e: any) {
+    console.error("ARB-SETTLE failed:", e?.message ?? e);
+  } finally {
+    settleRunning = false;
+  }
+  if (checked) console.log(`ARB-SETTLE checked ${checked} open arb(s), settled ${settled}`);
+}
+setTimeout(() => void settleOpenArbs(), 60_000);
+setInterval(() => void settleOpenArbs(), AUTO_SETTLE_MIN * 60_000);
+// ---- AUTO-SETTLE (end) ----
+
 const SCAN_KEY = Bun.env.ANTHROPIC_API_KEY ?? "";
 const SCAN_MODEL = Bun.env.ARB_SCAN_MODEL ?? "claude-sonnet-5-5";
 const scanTimes: number[] = [];
