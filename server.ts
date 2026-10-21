@@ -754,6 +754,25 @@ const B105_TOKEN = Bun.env.B105_TOKEN ?? "";
 // recorder script captures on the real page (its own network responses) so the real integration can be
 // designed from actual data instead of guessed. Remove this + the table once that's done.
 const DEXSPORT_DEBUG_TOKEN = Bun.env.DEXSPORT_DEBUG_TOKEN ?? "";
+// ---- score race log: the VPS posts Bovada's live table tennis score changes here (the strategy bot writes Polymarket's straight to the database) ----
+let scoreLogCleanedAt = 0;
+async function scoreLogStore(body: any) {
+  const evs: any[] = Array.isArray(body?.events) ? body.events.slice(0, 300) : [];
+  let n = 0;
+  for (const e of evs) {
+    const src = String(e?.src ?? "").slice(0, 12), key = String(e?.key ?? "").slice(0, 120);
+    const names = String(e?.names ?? "").slice(0, 160), score = String(e?.score ?? "").slice(0, 240), ts = Number(e?.ts);
+    if (!src || !key || !Number.isFinite(ts) || Math.abs(ts - Date.now()) > 6 * 3600e3) continue;
+    await sql`INSERT INTO score_log (src, key, names, score, ts) VALUES (${src}, ${key}, ${names}, ${score}, to_timestamp(${ts} / 1000.0))`;
+    n++;
+  }
+  if (Date.now() - scoreLogCleanedAt > 3600e3) {
+    scoreLogCleanedAt = Date.now();
+    try { await sql`DELETE FROM score_log WHERE ts < now() - interval '3 days'`; } catch {}
+  }
+  return { ok: true, stored: n };
+}
+
 async function dexsportDebugStore(body: any) {
   const url = tStr(body?.url, 500);
   const status = Number.isInteger(Number(body?.status)) ? Number(body.status) : null;
@@ -2213,12 +2232,18 @@ Bun.serve({
     const url = new URL(req.url);
     const isPost = req.method === "POST";
     if (req.method !== "GET" && req.method !== "HEAD" && !isPost) return new Response("Method not allowed", { status: 405 });
-    if (isPost && !url.pathname.startsWith("/api/tracker") && url.pathname !== "/api/trade" && url.pathname !== "/api/scan" && url.pathname !== "/api/b105" && url.pathname !== "/api/dexsport-debug" && url.pathname !== "/api/breaker/reset") return new Response("Method not allowed", { status: 405 });
+    if (isPost && !url.pathname.startsWith("/api/tracker") && url.pathname !== "/api/trade" && url.pathname !== "/api/scan" && url.pathname !== "/api/b105" && url.pathname !== "/api/dexsport-debug" && url.pathname !== "/api/breaker/reset" && url.pathname !== "/api/score-log") return new Response("Method not allowed", { status: 405 });
     const sec = { "x-content-type-options": "nosniff", "x-frame-options": "DENY", "referrer-policy": "no-referrer", "x-robots-tag": "noindex, nofollow" };
     if (isPost && url.pathname === "/api/b105") {
       if (!B105_TOKEN || req.headers.get("x-b105-token") !== B105_TOKEN) return Response.json({ error: "locked" }, { status: 401, headers: sec });
       try { return Response.json(b105Store(await req.json()), { headers: { "cache-control": "no-store", ...sec } }); }
       catch { return Response.json({ error: "bad request" }, { status: 400, headers: sec }); }
+    }
+    if (isPost && url.pathname === "/api/score-log") {
+      const bk = Bun.env.BETTOR_KEY ?? "";
+      if (!bk || req.headers.get("x-bettor-key") !== bk) return Response.json({ error: "locked" }, { status: 401, headers: sec });
+      try { return Response.json(await scoreLogStore(await req.json()), { headers: { "cache-control": "no-store", ...sec } }); }
+      catch (e: any) { return Response.json({ error: String(e?.message ?? "bad request").slice(0, 200) }, { status: 400, headers: sec }); }
     }
     if (isPost && url.pathname === "/api/dexsport-debug") {
       if (!DEXSPORT_DEBUG_TOKEN || req.headers.get("x-dexsport-token") !== DEXSPORT_DEBUG_TOKEN) return Response.json({ error: "locked" }, { status: 401, headers: sec });
