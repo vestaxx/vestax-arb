@@ -1945,11 +1945,12 @@ async function scan(): Promise<number> {
             const rowPm = { book: "polymarket", odds: dPm, liq: dp.depth || null };
             const rowGt = { book: bk, odds: dGt, liq: null };
             if (bk === "goated") { const gc = j.ge.comps.find((c: any) => c.id === leg.other); if (gc) arbGoatedLegs.set(key, { slug: j.ge.slug, q: gc.q, name: gc.name, at: Date.now() }); }
-            if (bk === "goated") void (arbBuy as any).autoTry?.(key, pct, !!j.live, String(j.ge.sport?.name ?? ""));
-            if (bk === "bovada") { const bc = j.ge.comps.find((c: any) => c.id === leg.other); const oid = bc && j.feed?.mlIds?.[bc.name]; if (bc && oid) { arbBovadaLegs.set(key, { outcomeId: String(oid), name: bc.name, at: Date.now() }); void (arbBuy as any).autoTry?.(key, pct, !!j.live, String(j.ge.sport?.name ?? "")); } }
+            let autoReady = bk === "goated"; // auto-fire is called only AFTER the arb is saved (below), so it can always find its database row
+            if (bk === "bovada") { const bc = j.ge.comps.find((c: any) => c.id === leg.other); const oid = bc && j.feed?.mlIds?.[bc.name]; if (bc && oid) { arbBovadaLegs.set(key, { outcomeId: String(oid), name: bc.name, at: Date.now() }); autoReady = true; } }
             const A = pmLong ? rowPm : rowGt, B = pmLong ? rowGt : rowPm;
             const uA = pmLong ? pmUrl : gtUrl, uB = pmLong ? gtUrl : pmUrl;
             const fs = await upsertArb({ key, sport: j.ge.sport.name, league: j.ge.league, market: "Moneyline", pa: j.L.description, pb: j.S.description, start: j.start, live: !!j.live, A, B, pct, uA, uB });
+            if (autoReady) void (arbBuy as any).autoTry?.(key, pct, !!j.live, String(j.ge.sport?.name ?? ""));
             console.log(`ARB ${pct.toFixed(2)}% ${label} (${pmLong ? j.L.description : j.S.description} on PM${bk === "goated" ? "" : ", other side on " + bk}) depth $${Math.round(dp.depth)}` +
               (j.byName ? ` || PM[${j.ev.title} | ${j.ptype} | ${j.ev.slug} | ${j.ev.startTime}] OTHER[${j.ge.comps[0].name} vs ${j.ge.comps[1].name} | ${j.ge.league} | ${j.ge.slug} | ${j.ge.scheduled}]` : ""));
             if (pct >= ALERT_ANY_PCT && fs && Date.now() - new Date(fs).getTime() < 20000) {
