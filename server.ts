@@ -8,6 +8,9 @@ const arbBovadaLegs = new Map<string, any>();
 
 const sql = new SQL({ url: Bun.env.DATABASE_URL!, max: 3, idleTimeout: 30 });
 const KEY = Bun.env.ARB_KEY ?? "";
+// ARB_WATCH: a pattern of game names (default below) whose every comparison is written to the log as a WATCH line, so you can see exactly
+// why the scanner does or doesn't list them. Set ARB_WATCH=off to silence it.
+const WATCH: RegExp | null = Bun.env.ARB_WATCH === "off" ? null : new RegExp(Bun.env.ARB_WATCH ?? "brute|ex-6666|baks|sokerorg", "i");
 const UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36";
 const pm: any = new PolymarketUS({});
 const GT = "https://apis.goated.com/sportsbook";
@@ -25,7 +28,11 @@ const TENNIS_ON = Bun.env.ARB_TENNIS === "1";
 // ARB_ESPORTS_OFF=1 to disable if it turns out to misfire once real traffic is seen.
 const ESPORTS_ON = Bun.env.ARB_ESPORTS_OFF !== "1";
 const FEED_MAX_PCT = Number(Bun.env.ARB_FEED_MAX_PCT ?? 8);
-const BVD_LIVE = Bun.env.BVD_LIVE === "1";
+// Live Bovada games are ON (BVD_LIVE=0 turns them off). Bovada's public price list is itself at least ~48 s old for live games, so a live Bovada
+// arb is only a CANDIDATE: before any money moves the buy re-reads Bovada's exact current price and Polymarket's, and refuses if the edge is gone.
+const BVD_LIVE = Bun.env.BVD_LIVE !== "0";
+const BVD_LIVE_MAX_AGE = Number(Bun.env.BVD_LIVE_MAX_AGE_MS ?? 150000);   // ignore live events whose price hasn't changed for longer than this
+const BVD_LIVE_TTL = Number(Bun.env.BVD_LIVE_TTL_MS ?? 90000);            // keep a live Bovada game this long between feed refreshes
 let bvdLiveDiagN = 0;
 const GEM_OFF = Bun.env.GEMINI_OFF === "1";
 const GEM_FEE = 0.07;
@@ -786,7 +793,7 @@ const BVD_HOST = "https://www.bovada.lv";
 const BVD_HEAD = { "user-agent": UA, accept: "application/json, text/plain, */*", "accept-language": "en-US,en;q=0.9", referer: BVD_HOST + "/" };
 function feedLive(book: string): FeedEv[] {
   const m = feeds[book], out: FeedEv[] = [], now = Date.now();
-  for (const [k, v] of m) { if (now - v.at > (v.ev.live ? 20000 : FEED_TTL[book])) m.delete(k); else out.push(v.ev); }
+  for (const [k, v] of m) { if (now - v.at > (v.ev.live ? (book === "bovada" && BVD_LIVE ? BVD_LIVE_TTL : 20000) : FEED_TTL[book])) m.delete(k); else out.push(v.ev); }
   return out;
 }
 function b105Store(body: any) {
@@ -859,11 +866,14 @@ const BVD_SPORTS: { sport: string; fb: [string, string][] }[] = [
   // meant to avoid). Fallback paths guessed, same caveat as esports above.
   { sport: "soccer", fb: [["EPL", "soccer/england-premier-league"], ["UCL", "soccer/uefa-champions-league"], ["La Liga", "soccer/spain-laliga"]] },
   { sport: "tennis", fb: [] },
+  // boxing and MMA (paths confirmed from the VPS: /boxing -> market "To Win the Bout", /ufc-mma -> market "Fight Winner"; both two-way, no Draw outcome shown)
+  { sport: "boxing", fb: [] },
+  { sport: "ufc-mma", fb: [] },
 ];
 // ESPT/ESPO/ESPORTS/ESPORT and SOCC are guesses at Bovada's short codes (unconfirmed, unlike the
 // others which came from real captured responses); if events come through with ev.sport unset,
 // check BOVADA feed logs for the actual code and add it here.
-const BVD_CODE: Record<string, string> = { FOOT: "football", BASK: "basketball", BASE: "baseball", HCKY: "hockey", TENN: "tennis", ESPT: "esports", ESPO: "esports", ESPORTS: "esports", ESPORT: "esports", SOCC: "soccer", SOCCER: "soccer" };
+const BVD_CODE: Record<string, string> = { FOOT: "football", BASK: "basketball", BASE: "baseball", HCKY: "hockey", TENN: "tennis", ESPT: "esports", ESPO: "esports", ESPORTS: "esports", ESPORT: "esports", SOCC: "soccer", SOCCER: "soccer", BOXI: "boxing", MMA: "mma" };
 const bvdCoupon = (p: string) => `/services/sports/event/coupon/events/A/description/${p}?marketFilterId=def&lang=en`;
 const bvdState: Record<string, string> = {};
 const bvdNum = (x: any) => { const n = parseFloat(String(x ?? "").replace(/[^0-9.+-]/g, "")); return Number.isFinite(n) ? n : NaN; };
@@ -880,7 +890,7 @@ function bvdCollect(ev: any, live: boolean, teams: string[], alt: boolean, out: 
       // never actually returns these periods; map moneylines are populated separately by
       // bvdFetchMapMl/pullBovadaMapMl below, which hits the per-event endpoint with no filter.
       const mapM = /^map\s*(\d+)/i.exec(pd);
-      if (!(per.main === true || /^(game|match|full)/i.test(pd) || mapM)) continue;
+      if (!(per.main === true || /^(game|match|full|fight|bout)/i.test(pd) || mapM)) continue;
       if (typeof per.live === "boolean" && per.live !== live) continue;
       const d = String(m.description ?? "").toLowerCase(), kd = String(m.key ?? "") + " " + d;
       if (!mapM && /team total|1st|2nd|half|quarter|period|set |games/.test(d)) continue;
@@ -889,7 +899,7 @@ function bvdCollect(ev: any, live: boolean, teams: string[], alt: boolean, out: 
       // into the same buckets as the full-match ones further down and silently corrupt them
       if (mapM && !(/2W-12|moneyline/i.test(kd) && !/total|spread|handicap|alt/.test(d))) continue;
       const outs: any[] = (m.outcomes ?? []).filter(bvdOpen);
-      if (/2W-12|moneyline/i.test(kd) && !/total|spread|handicap|alt/.test(d)) {
+      if (/2W-12|moneyline|to win the bout|fight winner/i.test(kd) && !/total|spread|handicap|alt/.test(d)) {
         if (mapM) {
           // a map's own moneyline -- kept separate from the full-match ml so it never gets
           // compared against the wrong map (or the series winner) by mistake
@@ -929,8 +939,8 @@ function bvdParse(ev: any, league: string): FeedEv | null {
       if (bvdLiveDiagN < 15) { bvdLiveDiagN++; console.log(`BVD-LIVE-DIAG #${bvdLiveDiagN} rejected: BVD_LIVE is off (lastModified age ${ageMs}ms, raw=${ev.lastModified})`); }
       return null;
     }
-    if (!(ageMs <= 20000)) {
-      if (bvdLiveDiagN < 15) { bvdLiveDiagN++; console.log(`BVD-LIVE-DIAG #${bvdLiveDiagN} rejected: stale -- lastModified age ${ageMs}ms (limit 20000), raw lastModified=${ev.lastModified}, Date.now()=${Date.now()}`); }
+    if (!(ageMs <= BVD_LIVE_MAX_AGE)) {
+      if (bvdLiveDiagN < 15) { bvdLiveDiagN++; console.log(`BVD-LIVE-DIAG #${bvdLiveDiagN} rejected: stale -- lastModified age ${ageMs}ms (limit ${BVD_LIVE_MAX_AGE}), raw lastModified=${ev.lastModified}, Date.now()=${Date.now()}`); }
       return null;
     }
   }
@@ -1485,9 +1495,22 @@ const SPORT_NAME: Record<string, string> = { football: "American Football", bask
 // after that fix -- which zeroes out addFeedJobs (its first line is `if (!kind) return out`) for
 // every esports market, silently disabling Bovada/Bet105/Gemini matching for esports entirely. Fixed
 // by matching the same singular convention here too.
+// Boxing / MMA: Polymarket games had no sport kind, so they were never compared against the Bovada / Bet105 / Gemini feeds. Recognised from any of the
+// fields we have (sport, market type, event / market slug). If a fight is still not matching, the FIGHT-KIND-DIAG line in the log shows what Polymarket calls it.
+const fightKind = (g: any) => {
+  const s = [g.sport, g.t, g.wm?.slug, g.ev?.slug, g.ev?.title].map((x) => String(x ?? "")).join(" ");
+  return /(^|[^a-z])(ufc|mma|pfl|bellator|cage)([^a-z]|$)/i.test(s) ? "mma" : /(^|[^a-z])(boxing|bout)([^a-z]|$)|aec-box/i.test(s) ? "boxing" : "";
+};
+let fightDiagN = 0;
+// logs (at most 12 times per start) any Polymarket game that LOOKS like a fight but got no sport kind, with the fields it was judged on
+function fightDiag(g: any, kind: string) {
+  if (kind || fightDiagN >= 12) return;
+  const txt = [g.sport, g.t, g.wm?.slug, g.ev?.slug, g.ev?.title].map((x) => String(x ?? "")).join(" | ");
+  if (/ufc|mma|box|fight|bellator|pfl|bout/i.test(txt)) { fightDiagN++; console.log(`FIGHT-KIND-DIAG #${fightDiagN}: ${txt.slice(0, 220)}`); }
+}
 const kindOf = (g: any) =>
-  g.sport ? (/football/.test(String(g.sport)) ? "football" : /basketball/.test(String(g.sport)) ? "basketball" : /baseball/.test(String(g.sport)) ? "baseball" : /esport/.test(String(g.sport)) ? "esports" : /soccer/.test(String(g.sport)) ? "soccer" : "")
-    : /tennis/i.test(g.t ?? "") ? "tennis" : /hockey|nhl/i.test(g.t ?? "") ? "hockey" : /esports/i.test(g.t ?? "") ? "esports" : /soccer/i.test(g.t ?? "") ? "soccer" : "";
+  g.sport ? (/football/.test(String(g.sport)) ? "football" : /basketball/.test(String(g.sport)) ? "basketball" : /baseball/.test(String(g.sport)) ? "baseball" : /esport/.test(String(g.sport)) ? "esports" : /soccer/.test(String(g.sport)) ? "soccer" : fightKind(g))
+    : /tennis/i.test(g.t ?? "") ? "tennis" : /hockey|nhl/i.test(g.t ?? "") ? "hockey" : /esports/i.test(g.t ?? "") ? "esports" : /soccer/i.test(g.t ?? "") ? "soccer" : fightKind(g);
 async function upsertArb(r: { key: string; sport: string; league: string; market: string; pa: string; pb: string; start: number; live: boolean; A: any; B: any; pct: number; uA: string | null; uB: string | null }) {
   const up: any = await sql`
     INSERT INTO arb_opps (opp_key, sport, league, market, player_a, player_b, start_time, is_live,
@@ -1525,7 +1548,7 @@ async function scan(): Promise<number> {
     else if (Date.now() - (lastChecked.get(jk(job)) ?? 0) > PRE_RECHECK_MS) pre.push(job);
   };
   const addFeedJobs = async (g: any, startP: number, isLiveP: boolean) => {
-    const kind = kindOf(g);
+    const kind = kindOf(g); fightDiag(g, kind);
     const out: Record<string, { n0: string; n1: string; ml: Record<string, number>; url?: string; league?: string; totals: Map<number, { over?: number; under?: number }>; handA: Map<number, number>; handB: Map<number, number> } | null> = { bet105: null, bovada: null, gemini: null };
     if (!kind) return out;
     for (const bk of FEED_BOOKS) {
@@ -1555,7 +1578,7 @@ async function scan(): Promise<number> {
       if (isLive || (start > Date.now() - 600000 && start - Date.now() < PRE_WINDOW_MS)) queue({ ...g, ge, live: isLive, start }, isLive);
     } else if (ge) blockedN++;
     const sP = Date.parse(g.ev.startTime ?? ""), lP = !!g.ev.live;
-    const kind = kindOf(g);
+    const kind = kindOf(g); fightDiag(g, kind);
     if (kind && !isBlocked(g.ev.slug, g.wm.slug, ge?.league, g.t) && (lP || (sP > Date.now() - 600000 && sP - Date.now() < PRE_WINDOW_MS))) {
       const fb = await addFeedJobs(g, sP, lP);
       const cross: CrossEntry[] = [];
@@ -1923,6 +1946,7 @@ async function scan(): Promise<number> {
             const pct = (1 / (1 / dPm + 1 / dGt) - 1) * 100;
             const label = `${j.L.description} vs ${j.S.description} (${j.ge.sport.name})`;
             noteClose(pct, label);
+            if (WATCH && WATCH.test(label)) console.log(`WATCH ${label} [${bk}]: Polymarket ${leg.side === "a" ? "best ask" : "other side (1 - best bid)"} ${(leg.p * 100).toFixed(1)}c = ${dPm.toFixed(3)} after fee | ${bk} ${dGt.toFixed(3)} | edge ${pct.toFixed(2)}% | Polymarket liquidity $${Math.round(leg.liq)} | bid ${bid} ask ${ask}`);
             if (pct <= 0) continue;
             // this cap used to only fire `if (j.feed)` -- i.e. only for cross-book feed matches
             // (Bovada/Bet105/Gemini), leaving the direct Polymarket-vs-Goated id/name-matched path
@@ -1936,9 +1960,9 @@ async function scan(): Promise<number> {
             // for table tennis specifically: it only runs `if (j.byName || sport === "tennis")`,
             // and "Table Tennis" satisfies neither. This cap is the one of the two safe to widen
             // unconditionally; removing j.feed here closes the gap for every path at once.
-            if (pct > FEED_MAX_PCT) { capSkip++; continue; }
+            if (pct > FEED_MAX_PCT) { capSkip++; if (WATCH && WATCH.test(label)) console.log(`WATCH ${label}: skipped, edge ${pct.toFixed(2)}% is over the ${FEED_MAX_PCT}% sanity cap`); continue; }
             const dp = await pmDepth(j.wm.slug, leg.side === "a", dPm, dGt, leg.liq);
-            if (!dp.ok) { lqSkip++; continue; }
+            if (!dp.ok) { lqSkip++; if (WATCH && WATCH.test(label)) console.log(`WATCH ${label}: skipped, Polymarket depth too thin for the bankroll test (depth $${Math.round(dp.depth || 0)})`); continue; }
             const key = j.wm.slug + "|" + leg.side + sfx;
             hits.push(key);
             const pmLong = leg.side === "a";
