@@ -2116,6 +2116,11 @@ async function trackerAdd(b: any) {
             ${x.book}, ${x.pick}, ${x.payout / x.stake}, ${x.stake}, ${x.payout},
             ${y.book}, ${y.pick}, ${y.payout / y.stake}, ${y.stake}, ${y.payout}, ${tStr(b?.note, 300) || null})
     RETURNING id`;
+  try {   // remember which Polymarket market this is, so it can be auto-settled even if the scanner never listed it as an arb
+    const pmLeg = x.book === "polymarket" ? x : y.book === "polymarket" ? y : null;
+    const hit = pmLeg ? findPmMarket(event, pmLeg.pick) : null;
+    if (hit && rows?.[0]?.id) await sql`UPDATE arb_tracker SET pm_slug = ${hit.slug}, pm_long = ${hit.long} WHERE id = ${rows[0].id}`;
+  } catch (e: any) { console.error("tracker pm market lookup failed:", e?.message ?? e); }
   // both legs just got recorded as filled -- let the phone know this one is now locked in and tracked
   const total = x.stake + y.stake;
   const locked = Math.min(x.payout, y.payout) - total;
@@ -2155,6 +2160,30 @@ async function trackerDelete(b: any) {
 const AUTO_SETTLE_MIN = Number(Bun.env.ARB_AUTO_SETTLE_MIN ?? 15);
 const AUTO_SETTLE_MAX_EDGE = Number(Bun.env.ARB_AUTO_SETTLE_MAX_EDGE ?? 8);
 const settleNoted = new Set<string>();
+const unsettledAt = new Map<number, number>();
+// a card the auto-settle can't handle used to stay open in silence; log it (once per 3 hours) and, once the game is 4+ hours old, tell the phone
+function unsettled(t: any, why: string) {
+  const now = Date.now();
+  if (now - (unsettledAt.get(t.id) ?? 0) < 3 * 3600e3) return;
+  unsettledAt.set(t.id, now);
+  console.log(`ARB-SETTLE #${t.id} ${t.event}: ${why}`);
+  const startMs = t.event_start ? new Date(t.event_start).getTime() : new Date(t.placed_at).getTime();
+  if (now - startMs > 4 * 3600e3) void ntfy(`Settle by hand: ${t.event}`, `I can't settle this one by myself: ${why}. Settle the card yourself once both books have paid out.`, "default");
+}
+// find the Polymarket market (and which side you hold) for a game by its two team names, from the games the scanner currently has listed
+function findPmMarket(event: string, pmPick: string): { slug: string; long: boolean } | null {
+  const hit = (team: string) => { const t = liveToks(team); if (!t.length) return false; const hay = new Set(liveToks(event)); return t.every((w) => hay.has(w)); };
+  const found: any[] = [];
+  for (const arr of [pmGames, pmNameGames]) for (const g of arr ?? []) {
+    const L = g?.L?.description, S = g?.S?.description, slug = g?.wm?.slug;
+    if (L && S && slug && hit(String(L)) && hit(String(S))) found.push(g);
+  }
+  if (!found.length || new Set(found.map((g) => g.wm.slug)).size !== 1) return null;
+  const g = found[0];
+  const pk = pmPick.trim().toLowerCase(), na = String(g.L.description).trim().toLowerCase(), nb = String(g.S.description).trim().toLowerCase();
+  const long = pk === na ? true : pk === nb ? false : (pk.includes(na) || na.includes(pk)) && !(pk.includes(nb) || nb.includes(pk)) ? true : (pk.includes(nb) || nb.includes(pk)) && !(pk.includes(na) || na.includes(pk)) ? false : null;
+  return long === null ? null : { slug: String(g.wm.slug), long };
+}
 let settleRunning = false;
 async function pmSettlementValue(slug: string): Promise<number | null> {
   const read = (raw: any) => (raw !== undefined && raw !== null && raw !== "" && Number.isFinite(Number(raw)) ? Number(raw) : null);
@@ -2174,7 +2203,7 @@ async function settleOpenArbs() {
   settleRunning = true;
   let checked = 0, settled = 0;
   try {
-    const open: any[] = await sql`SELECT id, placed_at, event, event_start, a_book, a_pick, a_stake, a_payout, b_book, b_pick, b_stake, b_payout FROM arb_tracker WHERE status = 'open' ORDER BY placed_at`;
+    const open: any[] = await sql`SELECT id, placed_at, event, event_start, a_book, a_pick, a_stake, a_payout, b_book, b_pick, b_stake, b_payout, pm_slug, pm_long FROM arb_tracker WHERE status = 'open' ORDER BY placed_at`;
     for (const t of open) {
       const refMs = t.event_start ? new Date(t.event_start).getTime() : new Date(t.placed_at).getTime();
       if (t.event_start ? refMs > Date.now() : refMs + 20 * 60e3 > Date.now()) continue; // game hasn't started yet
@@ -2184,17 +2213,24 @@ async function settleOpenArbs() {
       const refIso = new Date(refMs).toISOString(), placedIso = new Date(t.placed_at).toISOString();
       // find the same game among the scanner's records to get its Polymarket market: same two names, and either the arb was on the scanner
       // when you placed it, or its start time is within 2 days of this card's
-      const [o]: any = await sql`SELECT opp_key, player_a, player_b FROM arb_opps
+      let slug = "", pmLong: boolean | null = null;
+      if (t.pm_slug && t.pm_long !== null && t.pm_long !== undefined) {
+        // the Polymarket market was saved with the card when it was added, so this works even for arbs the scanner never listed
+        slug = String(t.pm_slug); pmLong = !!t.pm_long;
+      } else {
+        const [o]: any = await sql`SELECT opp_key, player_a, player_b FROM arb_opps
         WHERE length(player_a) > 2 AND length(player_b) > 2
           AND position(lower(player_a) in lower(${String(t.event)})) > 0 AND position(lower(player_b) in lower(${String(t.event)})) > 0
           AND ( (${placedIso}::timestamptz BETWEEN first_seen - interval '1 hour' AND last_seen + interval '1 hour')
                 OR abs(extract(epoch from (coalesce(start_time, first_seen) - ${refIso}::timestamptz))) < 172800 )
         ORDER BY abs(extract(epoch from (last_seen - ${placedIso}::timestamptz))) LIMIT 1`;
-      if (!o) continue;
-      const slug = String(o.opp_key).split("|")[0];
-      const pk = String(pmIsA ? t.a_pick : t.b_pick).trim().toLowerCase(), na = String(o.player_a).trim().toLowerCase(), nb = String(o.player_b).trim().toLowerCase();
-      const pmLong = pk === na ? true : pk === nb ? false : (pk.includes(na) || na.includes(pk)) && !(pk.includes(nb) || nb.includes(pk)) ? true : (pk.includes(nb) || nb.includes(pk)) && !(pk.includes(na) || na.includes(pk)) ? false : null;
-      if (pmLong === null) continue;
+        if (o) {
+        slug = String(o.opp_key).split("|")[0];
+        const pk = String(pmIsA ? t.a_pick : t.b_pick).trim().toLowerCase(), na = String(o.player_a).trim().toLowerCase(), nb = String(o.player_b).trim().toLowerCase();
+        pmLong = pk === na ? true : pk === nb ? false : (pk.includes(na) || na.includes(pk)) && !(pk.includes(nb) || nb.includes(pk)) ? true : (pk.includes(nb) || nb.includes(pk)) && !(pk.includes(na) || na.includes(pk)) ? false : null;
+        }
+      }
+      if (!slug || pmLong === null) { unsettled(t, "I can't find this game's Polymarket market (it was never listed on the scanner and wasn't recognised when you added it)"); continue; }
       const v = await pmSettlementValue(slug);
       if (v === null) continue; // not resolved yet
       const total = Number(t.a_stake) + Number(t.b_stake);
