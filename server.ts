@@ -333,39 +333,66 @@ function walkBuy(levels: { p: number; q: number }[], maxRaw: number, cash: numbe
   }
   return { shares, spent, left };
 }
-async function pmDepth(slug: string, long: boolean, dPm: number, dGt: number, topLiq: number): Promise<{ ok: boolean; depth: number; need: number }> {
-  const w = wholePair(ALERT_BANKROLL, dGt, dPm);
-  const ia = 1 / dPm, ib = 1 / dGt;
-  const C = w ? w[1] : (ALERT_BANKROLL * ia) / (ia + ib);
-  const Sg = w ? w[0] : ALERT_BANKROLL - C;
-  const maxRaw = breakEvenPrice((Sg + C) / Sg);
-  const need = Math.max(MIN_LIQ_USD, C * LIQ_CUSHION);
+// ---- DEPTH-AWARE SIZING (start) ----
+// The scanner lists an arb whenever SOME safe size fits Polymarket's order book (>= ARB_LIST_MIN_TOTAL dollars across both legs); it no longer hides an
+// arb just because the full bankroll doesn't fit. The buy then sizes to the same book: it shrinks the Polymarket cash to what the book can fill at an
+// acceptable price, and sizes the sportsbook leg to match so both outcomes stay positive. Never above the bankroll.
+const SIZE_BANKROLL = Number(Bun.env.ARB_AUTO_BANKROLL ?? Bun.env.ALERT_BANKROLL ?? 100);
+const LIST_MIN_TOTAL = Number(Bun.env.ARB_LIST_MIN_TOTAL ?? 6);
+async function loadBookLevels(slug: string, long: boolean): Promise<{ levels: { p: number; q: number }[]; failed: boolean }> {
   let levels: { p: number; q: number }[] = [];
-  let fetchFailed = false;
   try {
     const d = (await pm.markets.book(slug))?.marketData;
     const raw = long ? (d?.offers ?? d?.asks ?? []) : (d?.bids ?? []);
     levels = (Array.isArray(raw) ? raw : []).map(bookLevel).filter(Boolean) as { p: number; q: number }[];
     if (!long) levels = levels.map((l) => ({ p: 1 - l.p, q: l.q }));
-    levels.sort((a, b) => a.p - b.p);
-  } catch (e: any) { console.error("book failed", slug, e?.message ?? e); fetchFailed = true; }
-  // an empty `levels` array means two very different things, and treating them the same is exactly
-  // the bug that let repeated unhedged naked bets through on thin basketball markets overnight: the
-  // live book fetch can genuinely succeed and come back empty (no resting asks at all -- real,
-  // thin-market risk, confirmed via live TRADE logs showing "nothing more was available at or below
-  // the limit" immediately after this check passed), or the fetch itself can throw (a transient API
-  // hiccup, unrelated to whether liquidity actually exists). Only the second case is safe to wave
-  // through on the old topLiq estimate from scan time; the first means there is nothing there right
-  // now and must be treated as not-ok, regardless of how much liquidity scan time thought it saw.
-  if (!levels.length) return fetchFailed ? { ok: topLiq >= need * 2, depth: topLiq, need } : { ok: false, depth: 0, need };
+    levels.sort((x, y) => x.p - y.p);
+    return { levels, failed: false };
+  } catch (e: any) { console.error("book failed", slug, e?.message ?? e); return { levels, failed: true }; }
+}
+function depthCash(levels: { p: number; q: number }[], maxRaw: number) {
   let depth = 0;
   for (const l of levels) { if (l.p > maxRaw) break; depth += l.q * costPerShare(l.p); }
-  const fill = walkBuy(levels, maxRaw, C);
-  const profitQ = Math.min(Sg * dGt, C * dPm) - Sg - C;
-  const profitA = Math.min(Sg * dGt, fill.shares) - Sg - fill.spent;
-  const ok = depth >= need && fill.left < 0.5 && profitA >= Math.max(0.01, profitQ * SLIP_KEEP);
-  return { ok, depth, need };
+  return depth;
 }
+// biggest whole-dollar pair (sportsbook stake, Polymarket cash) up to `bankroll` whose Polymarket leg the book can actually fill, or null
+function sizeFromLevels(levels: { p: number; q: number }[], bankroll: number, dGt: number, dPm: number): { sg: number; sp: number } | null {
+  let bank = Math.floor(bankroll);
+  const ia = 1 / dPm, ib = 1 / dGt;
+  for (let i = 0; i < 16 && bank >= 4; i++) {
+    const w = wholePair(bank, dGt, dPm);
+    if (!w) return null;
+    const [sg, sp] = w;
+    const maxRaw = breakEvenPrice((sg + sp) / sg);
+    const fill = walkBuy(levels, maxRaw, sp);
+    const profitQ = Math.min(sg * dGt, sp * dPm) - sg - sp;
+    const profitA = Math.min(sg * dGt, fill.shares) - sg - fill.spent;
+    if (fill.left < 0.5 && profitA >= Math.max(0.01, profitQ * SLIP_KEEP)) return { sg, sp };
+    // the book can't fill that much: aim at what it can (with a cushion), then re-split the sportsbook leg to match
+    const can = depthCash(levels, maxRaw);
+    const targetSp = Math.min(sp * 0.85, can * 0.9);
+    if (!(targetSp >= 2)) return null;
+    bank = Math.floor((targetSp * (ia + ib)) / ia);
+  }
+  return null;
+}
+async function sizeStakes(slug: string, long: boolean, dGt: number, dPm: number, bankroll: number): Promise<{ sg: number; sp: number } | null | undefined> {
+  const { levels, failed } = await loadBookLevels(slug, long);
+  if (failed) return undefined;               // couldn't read the book: caller falls back to the plain bankroll split
+  if (!levels.length) return null;            // a real, empty book: nothing to buy
+  return sizeFromLevels(levels, bankroll, dGt, dPm);
+}
+async function pmDepth(slug: string, long: boolean, dPm: number, dGt: number, topLiq: number): Promise<{ ok: boolean; depth: number; need: number; size?: number }> {
+  const need = LIST_MIN_TOTAL;
+  const { levels, failed } = await loadBookLevels(slug, long);
+  // an empty book that loaded fine means there is nothing there right now (real thin-market risk); a failed fetch is a transient error and may fall
+  // back on the scan-time estimate. Treating the two the same let unhedged bets through on thin basketball markets before.
+  if (!levels.length) return failed ? { ok: topLiq >= need * 2, depth: topLiq, need } : { ok: false, depth: 0, need };
+  const sized = sizeFromLevels(levels, SIZE_BANKROLL, dGt, dPm);
+  const depth = sized ? depthCash(levels, breakEvenPrice((sized.sg + sized.sp) / sized.sg)) : 0;
+  return { ok: !!sized && sized.sg + sized.sp >= LIST_MIN_TOTAL, depth, need, size: sized ? sized.sg + sized.sp : 0 };
+}
+// ---- DEPTH-AWARE SIZING (end) ----
 const alerted = new Map<string, number>();
 async function ntfy(title: string, body: string, priority = "high", click?: string | null, actions?: string): Promise<boolean> {
   if (!NTFY_TOPIC) return false;
@@ -740,7 +767,7 @@ async function gtMarkets(ev: any): Promise<{ winner: Record<string, number> | nu
   return { winner: gtWinnerFrom(mk, ev), totals: team ? gtTotalsFrom(mk) : (new Map() as GtTot), hand: team ? gtHandicapFrom(mk) : [] };
 }
 
-type FeedEv = { teams: [string, string]; spreads: { team: string; line: number; odds: number }[]; totals: { line: number; over?: number; under?: number }[]; ml: Record<string, number>; live: boolean; start?: number; url?: string; link?: string; league?: string; sport?: string; mapMl?: Record<number, Record<string, number>>; mlIds?: Record<string, string> };
+type FeedEv = { teams: [string, string]; spreads: { team: string; line: number; odds: number }[]; totals: { line: number; over?: number; under?: number }[]; ml: Record<string, number>; live: boolean; start?: number; url?: string; link?: string; league?: string; sport?: string; mapMl?: Record<number, Record<string, number>>; mlIds?: Record<string, string>; bid?: string; home?: string };
 const feeds: Record<string, Map<string, { at: number; ev: FeedEv }>> = { bet105: new Map(), bovada: new Map(), gemini: new Map() };
 const FEED_BOOKS = ["bet105", "bovada", "gemini"];
 // bovada's non-live TTL was 30000 -- a third of bet105's and well under gemini's, despite all three
@@ -951,6 +978,9 @@ function bvdParse(ev: any, league: string): FeedEv | null {
   if (teams.length !== 2 || teams[0] === teams[1]) return null;
   const out: FeedEv = { teams: [teams[0], teams[1]], spreads: [], totals: [], ml: {}, live, league: league || undefined, sport: BVD_CODE[String(ev.sport)] };
   if (Number.isFinite(st) && st > 1e11) out.start = st;
+  if (ev.id != null) out.bid = String(ev.id);
+  const homeC = (ev?.competitors ?? []).find((c: any) => c?.home === true);
+  if (homeC?.name) out.home = String(homeC.name).trim();
   if (ev.link) { out.link = String(ev.link); out.url = BVD_HOST + "/sports" + out.link; }
   bvdCollect(ev, live, teams, false, out);
   // soccer totals-only: a 3-way moneyline (or an Asian handicap that can push) is exactly the tie
@@ -2196,6 +2226,80 @@ setTimeout(() => void settleOpenArbs(), 60_000);
 setInterval(() => void settleOpenArbs(), AUTO_SETTLE_MIN * 60_000);
 // ---- AUTO-SETTLE (end) ----
 
+// ---- LIVE SCORES (start) ----
+// The live score box on the arbs page: for every OPEN tracker arb, find the same game in Bovada's feed (the feed keeps Bovada's event id and which team is
+// home), then read Bovada's scoreboard for it: score, quarter / inning / set, game clock. Read-only, cached for a few seconds.
+const LIVE_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36";
+const liveCache = new Map<string, { at: number; v: any }>();
+const liveToks = (x: string) => String(x ?? "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").split(/[^a-z0-9]+/).filter((w) => w.length > 2);
+function teamHit(team: string, text: string) {
+  const t = liveToks(team); if (!t.length) return false;
+  const hay = new Set(liveToks(text));
+  return t.filter((w) => hay.has(w)).length >= Math.max(1, Math.ceil(t.length / 2));
+}
+function findBvd(event: string, startMs: number | null): { id: string; ev: FeedEv } | null {
+  let best: { id: string; ev: FeedEv } | null = null, bestScore = -1;
+  for (const [, v] of feeds.bovada) {
+    const e = v.ev;
+    if (!e.bid || !(teamHit(e.teams[0], event) && teamHit(e.teams[1], event))) continue;
+    let sc = e.live ? 2 : 0;
+    if (startMs && e.start) { const d = Math.abs(e.start - startMs) / 3600e3; if (d > 36) continue; sc += 1 - d / 36; } else sc += 0.5;
+    if (sc > bestScore) { best = { id: e.bid, ev: e }; bestScore = sc; }
+  }
+  return best;
+}
+async function bvdBoard(bid: string): Promise<any | null> {
+  const hit = liveCache.get(bid);
+  if (hit && Date.now() - hit.at < 4000) return hit.v;
+  let v: any = null;
+  for (const accept of ["application/vnd.scoreboards.full+json", "application/vnd.scoreboards.summary+json"]) {
+    try {
+      const r = await fetch(`${BVD_HOST}/services/sports/results/api/v1/scores/${encodeURIComponent(bid)}`, { headers: { "user-agent": LIVE_UA, accept, referer: BVD_HOST + "/" }, signal: AbortSignal.timeout(6000) });
+      if (r.status === 200) { v = await r.json().catch(() => null); if (v) break; }
+    } catch {}
+  }
+  liveCache.set(bid, { at: Date.now(), v });
+  if (liveCache.size > 300) for (const [k, x] of liveCache) if (Date.now() - x.at > 60000) liveCache.delete(k);
+  return v;
+}
+function liveShape(j: any, ev: FeedEv) {
+  const ls = j?.latestScore ?? {}, c = j?.clock ?? {}, cur = j?.currentPeriodScore ?? null;
+  const per = String(c.period ?? "").trim(), sport = String(j?.sport ?? "").toUpperCase();
+  const homeName = ev.home ?? ev.teams[1];
+  const awayName = ev.teams[0] === homeName ? ev.teams[1] : ev.teams[0];
+  const final = /^(final|finished|ended|complete|ft)/i.test(per);
+  const sets = /TENN|TABL|VOLL|BADM|DART/.test(sport);          // sets / games sports: the headline score is sets, then the current game
+  const prev = (Array.isArray(j?.previousPeriodsScore) ? j.previousPeriodsScore : []).map((p: any) => `${p?.visitor}-${p?.home}`);
+  let detail = "", extra = "";
+  if (final) detail = "Final";
+  else if (sets) {
+    detail = cur ? `Game ${Number(c.periodNumber) || prev.length + 1}: ${cur.visitor}-${cur.home}` : per;      // numbers read away-home, the same order as the box on the page
+    extra = prev.length ? "Earlier games: " + prev.join(", ") : "";
+  } else {
+    detail = [/^\d+$/.test(per) ? "Period " + per : per, String(c.gameTime ?? "").trim()].filter(Boolean).join(" ");
+    const sd = j?.sportDetails && typeof j.sportDetails === "object" ? Object.entries(j.sportDetails).filter(([, x]) => x !== null && typeof x !== "object" && String(x) !== "").slice(0, 5) : [];
+    extra = sd.map(([k, x]) => `${k} ${x}`).join(" · ");
+  }
+  const hasScore = ls.home != null && ls.visitor != null;
+  return {
+    found: true, status: final ? "final" : ev.live || hasScore ? "live" : "pre",
+    home: { name: homeName, score: ls.home ?? null }, away: { name: awayName, score: ls.visitor ?? null },
+    detail, extra, sets, ticking: !!c.isTicking, updated: Date.now(),
+  };
+}
+async function liveScores() {
+  const rows: any[] = await sql`SELECT id, event, event_start FROM arb_tracker WHERE status = 'open' ORDER BY placed_at`;
+  const out = await Promise.all(rows.map(async (t: any) => {
+    const hit = findBvd(String(t.event), t.event_start ? new Date(t.event_start).getTime() : null);
+    if (!hit) return { id: t.id, found: false };
+    const j = await bvdBoard(hit.id);
+    if (!j) return { id: t.id, found: false };
+    return { id: t.id, ...liveShape(j, hit.ev) };
+  }));
+  return { rows: out };
+}
+// ---- LIVE SCORES (end) ----
+
 const SCAN_KEY = Bun.env.ANTHROPIC_API_KEY ?? "";
 const SCAN_MODEL = Bun.env.ARB_SCAN_MODEL ?? "claude-sonnet-5-5";
 const scanTimes: number[] = [];
@@ -2250,7 +2354,7 @@ button{margin-top:12px;width:100%;padding:12px;border:0;border-radius:999px;back
 <body><form method="GET" action="/"><img src="/logo.png" alt=""/><h1>VeSTAX ARBS</h1>
 <input name="key" type="password" placeholder="Passcode" autocomplete="current-password"/><button>Enter</button></form></body></html>`;
 
-const arbBuy = makeArbBuy({ sql, trade, tradeQuote, pmDecimal, wholePair, ntfy, trackerAdd, legs: arbGoatedLegs, bvdLegs: arbBovadaLegs });
+const arbBuy = makeArbBuy({ sql, trade, tradeQuote, pmDecimal, wholePair, sizeStakes, ntfy, trackerAdd, legs: arbGoatedLegs, bvdLegs: arbBovadaLegs });
 Bun.serve({
   port: Number(Bun.env.PORT ?? 3000),
   async fetch(req) {
@@ -2315,6 +2419,10 @@ Bun.serve({
     if (url.pathname === "/api/tracker") {
       try { return Response.json({ rows: await trackerRows() }, { headers: { "cache-control": "no-store", ...sec } }); }
       catch (e: any) { console.error("tracker load failed:", e?.message ?? e); return Response.json({ error: "unavailable" }, { status: 500, headers: sec }); }
+    }
+    if (url.pathname === "/api/live") {
+      try { return Response.json(await liveScores(), { headers: { "cache-control": "no-store", ...sec } }); }
+      catch (e: any) { console.error("live scores failed:", e?.message ?? e); return Response.json({ rows: [] }, { headers: { "cache-control": "no-store", ...sec } }); }
     }
     if (url.pathname === "/api/test-alert") {
       const ok = await ntfy("VeSTAX ARBS test alert", "Test alert: if you can read this, phone alerts are working.", "default", PAGE_URL, `view, Arbs page, ${PAGE_URL}`);

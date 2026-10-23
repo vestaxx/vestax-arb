@@ -18,6 +18,15 @@ const BETTOR_URL = (Bun.env.BETTOR_URL ?? "").replace(/\/+$/, "");
 const BETTOR_KEY = Bun.env.BETTOR_KEY ?? "";
 const MAX_USD = Number(Bun.env.ARB_BUY_MAX_USD ?? 25); // most that can be spent across both legs in one click
 const DEFAULT_BANK = Number(Bun.env.ARB_BUY_BANKROLL ?? 10);
+// Auto-fire needs a bigger edge than a manual tap on the FRESH prices (the buy re-reads both prices right before any money moves).
+// Thin edges are what flipped to a small loss before; live Bovada candidates come from a ~50 s old price list, so this is the real gate.
+const AUTO_MIN_VERIFIED_PCT = Number(Bun.env.ARB_AUTO_MIN_VERIFIED_PCT ?? 1.0);
+// Boxing / MMA can end in a draw. Polymarket settles a draw at 50c per share and the sportsbook (when it refunds a draw) pays the stake back, so a draw
+// only works out when the Polymarket side is the UNDERDOG (a 50c payout beats a low price; it loses on a favorite). Auto-fire only buys those fights when
+// the Polymarket price is at or under this (default 45c, a 5c margin under 50c). ARB_FIGHT_MAX_PM_PRICE=1 switches the rule off.
+const FIGHT_MAX_PM_PRICE = Number(Bun.env.ARB_FIGHT_MAX_PM_PRICE ?? 0.45);
+// Auto-fire skips a buy that shrinks below this many dollars in total across both legs (when the book only fits a few dollars, the edge isn't worth the risk).
+const AUTO_MIN_TOTAL = Number(Bun.env.ARB_AUTO_MIN_TOTAL ?? 10);
 const MIN_PCT = Number(Bun.env.ARB_BUY_MIN_PCT ?? 0.5); // refuse if the fresh prices no longer clear this
 
 // ---- auto-fire settings (OFF after every restart unless ARB_AUTO=1; the /auto page switches it on and off) ----
@@ -33,7 +42,7 @@ const TT_START_HOUR = Number(Bun.env.ARB_TT_START_HOUR ?? 23);
 const TT_END_HOUR = Number(Bun.env.ARB_TT_END_HOUR ?? 5);
 const ptHour = () => Number(new Intl.DateTimeFormat("en-US", { timeZone: "America/Los_Angeles", hour: "numeric", hourCycle: "h23" }).format(new Date()));
 const AUTO_MAX_PER_DAY = Number(Bun.env.ARB_AUTO_MAX_PER_DAY ?? 10); // most auto-buys in any 24 hours
-const AUTO_SKIP = /tennis|boxing|mma|ufc|darts/i; // settlement-rule mismatches on retirements/no-shows; table tennis is exempt below
+const AUTO_SKIP = new RegExp(Bun.env.ARB_AUTO_SKIP ?? "darts", "i"); // sports auto-fire never buys (live-only now, so tennis/boxing/MMA are allowed; set ARB_AUTO_SKIP=darts|boxing|... to change); table tennis is exempt below
 const ROUTINE = /isn't active|No fresh Goated|only .* edge|edge is only|no longer|above the break-even|already running|just bought|no open price|no usable price/i;
 
 export function makeArbBuy(d: Deps) {
@@ -44,6 +53,9 @@ export function makeArbBuy(d: Deps) {
   let bvdLoginBadUntil = 0, bvdLoginAlertAt = 0;
   // Auto-fire only buys games that start within this many hours (or are already live). The scanner still lists everything.
   const AUTO_MAX_HOURS = Number(Bun.env.ARB_AUTO_MAX_HOURS ?? 12);
+  // Auto-fire buys LIVE games only (pre-match arbs still show up on the page; you can still tap them yourself). ARB_AUTO_LIVE_ONLY=0 goes back
+  // to the old rule of "live, or starting within ARB_AUTO_MAX_HOURS hours".
+  const AUTO_LIVE_ONLY = Bun.env.ARB_AUTO_LIVE_ONLY !== "0";
   const farNoted = new Map<string, number>();
   const isLoginErr = (e: string) => /NotLoggedIn|Please log in|log in to place/i.test(e);
 
@@ -96,14 +108,25 @@ export function makeArbBuy(d: Deps) {
     const dGt: number = sb.dGt;
     if (!(dGt > 1)) throw new Error(`${BK} has no usable price for that outcome right now.`);
     if (p0 == null) throw new Error("Polymarket has no open price for this market right now.");
+    if (body?.triggeredBy === "auto" && /boxing|mma|ufc|martial/i.test(String(row.sport ?? "")) && p0 > FIGHT_MAX_PM_PRICE)
+      throw new Error(`Fight with a possible draw: auto-fire only buys the Polymarket side when it is the underdog (at or under ${Math.round(FIGHT_MAX_PM_PRICE * 100)}c), and it is ${(p0 * 100).toFixed(1)}c. Nothing was bought.`);
     const dPm = d.pmDecimal(p0);
     const pct = (1 / (1 / dPm + 1 / dGt) - 1) * 100;
-    if (pct < MIN_PCT) throw new Error(`The edge is only ${pct.toFixed(2)}% on the fresh prices (needs ${MIN_PCT}%). Nothing was bought.`);
+    const needPct = body?.triggeredBy === "auto" ? Math.max(MIN_PCT, AUTO_MIN_VERIFIED_PCT) : MIN_PCT;
+    if (pct < needPct) throw new Error(`The edge is only ${pct.toFixed(2)}% on the fresh prices (needs ${needPct}%). Nothing was bought.`);
 
-    const w = d.wholePair(bankroll, dGt, dPm);
+    // Size to Polymarket's order book: the Polymarket cash shrinks to what the book can fill at an acceptable price, and the sportsbook stake is re-split so
+    // both outcomes still win, never above the bankroll. (If the book can't be read at all, fall back to the plain bankroll split.)
+    let w: [number, number] | null;
+    const sized: any = d.sizeStakes ? await d.sizeStakes(pmSlug, long, dGt, dPm, bankroll) : undefined;
+    if (sized === null) throw new Error("Polymarket's order book is too thin for even a small safe bet here right now. Nothing was bought.");
+    w = sized ? [sized.sg, sized.sp] : d.wholePair(bankroll, dGt, dPm);
     if (!w) throw new Error("Couldn't find whole-dollar stakes that win either way at this bankroll.");
-    const [sg, sp] = w; // sg = Goated stake, sp = Polymarket cash
+    const [sg, sp] = w; // sg = sportsbook stake, sp = Polymarket cash
     if (sg < 1 || sp < 1) throw new Error("Stakes came out under $1. Try a bigger bankroll.");
+    if (body?.triggeredBy === "auto" && sg + sp < AUTO_MIN_TOTAL)
+      throw new Error(`Only $${sg + sp} fits Polymarket's depth here (auto-fire needs at least $${AUTO_MIN_TOTAL} in total). Nothing was bought.`);
+    const sizedByDepth = !!sized && sg + sp < bankroll * 0.9;
 
     // check the Polymarket leg is buyable at these exact numbers BEFORE touching the sportsbook
     const tradeBody: any = { id, cash: sp, stake: sg, payout: sg * dGt };
@@ -116,7 +139,7 @@ export function makeArbBuy(d: Deps) {
     const plan = {
       dry, book: BK, match: `${row.player_a} vs ${row.player_b}`, goated: { pick: gPick, stake: sg, odds: dGt }, // 'goated' is the sportsbook leg, whichever book it is
       polymarket: { pick: pmPick, cash: sp, priceCents: Math.round(p0 * 1000) / 10 }, edgePct: Math.round(pct * 100) / 100,
-      expectedProfitUsd: Math.round((q.profitNow ?? 0) * 100) / 100, bankroll,
+      expectedProfitUsd: Math.round((q.profitNow ?? 0) * 100) / 100, bankroll, sizedByDepth, totalStaked: sg + sp,
     };
     if (dry) return plan;
 
@@ -216,7 +239,11 @@ export function makeArbBuy(d: Deps) {
       const isTT = /table tennis/i.test(sport);
       const hr = ptHour();
       const inTtWindow = hr >= TT_START_HOUR || hr < TT_END_HOUR;
-      if (isTT && TT_NIGHT_ONLY && !inTtWindow) return; // too close to the strategy bot's hours
+      if (isTT && TT_NIGHT_ONLY && !inTtWindow) {
+        // outside the night window, table tennis is only off-limits while the strategy bot is switched on (it trades the same market on the same account)
+        const [stg]: any = await sql`SELECT enabled FROM settings WHERE id = 1`;
+        if (stg?.enabled !== false) return;
+      }
       const m = /^([^|~]+)\|([ab])(~bvd)?$/.exec(key);
       if (!m) return;
       if (m[3] && Date.now() < bvdLoginBadUntil) return; // Bovada's login is expired: no retrying every minute until it has been fixed
@@ -238,13 +265,14 @@ export function makeArbBuy(d: Deps) {
         if ((cntRows?.[0]?.n ?? 0) >= AUTO_MAX_PER_DAY) return;
         const row: any = rowRows?.[0];
         if (!row) return;
-        // too far ahead (or no known start time) -> don't auto-buy; your money would sit locked for days
+        // not live (live-only mode), or too far ahead / no known start time (old mode) -> don't auto-buy; pre-match money sits locked for days
         const startMs = row.start_time ? new Date(row.start_time).getTime() : NaN;
         const hoursAway = (startMs - Date.now()) / 3600e3;
-        if (!row.is_live && !(Number.isFinite(hoursAway) && hoursAway <= AUTO_MAX_HOURS)) {
+        const blocked = AUTO_LIVE_ONLY ? !row.is_live : !row.is_live && !(Number.isFinite(hoursAway) && hoursAway <= AUTO_MAX_HOURS);
+        if (blocked) {
           if (Date.now() - (farNoted.get(key) ?? 0) > 6 * 3600e3) {
             farNoted.set(key, Date.now());
-            note(`skipped ${key}: ${Number.isFinite(hoursAway) ? "starts in " + Math.round(hoursAway) + " h" : "no start time known"} (auto-fire only buys games starting within ${AUTO_MAX_HOURS} h)`);
+            note(`skipped ${key}: ${AUTO_LIVE_ONLY ? "not live yet (auto-fire only buys live games)" : (Number.isFinite(hoursAway) ? "starts in " + Math.round(hoursAway) + " h" : "no start time known") + " (auto-fire only buys games starting within " + AUTO_MAX_HOURS + " h)"}`);
           }
           return;
         }
