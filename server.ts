@@ -2345,6 +2345,27 @@ async function liveScores() {
 }
 // ---- LIVE SCORES (end) ----
 
+// ---- ARB P&L (start) ----
+// Realized profit for the P&L calendar on the arbs page: every settled tracker arb, on the day (Pacific) it settled. profit = money returned - both stakes.
+async function pnlData() {
+  const rows: any[] = await sql`SELECT id, event, sport, a_book, b_book, status, a_stake, b_stake, returned,
+      (settled_at AT TIME ZONE 'America/Los_Angeles')::date::text AS day
+    FROM arb_tracker WHERE status IN ('won','lost','other') AND settled_at IS NOT NULL AND returned IS NOT NULL
+    ORDER BY settled_at DESC LIMIT 1500`;
+  const [o]: any = await sql`SELECT count(*)::int AS n, coalesce(sum(a_stake + b_stake), 0)::float AS staked,
+      coalesce(sum(least(a_payout, b_payout) - a_stake - b_stake), 0)::float AS locked FROM arb_tracker WHERE status = 'open'`;
+  const [t]: any = await sql`SELECT (now() AT TIME ZONE 'America/Los_Angeles')::date::text AS today`;
+  return {
+    today: t?.today ?? "",
+    open: { n: Number(o?.n ?? 0), staked: Number(o?.staked ?? 0), locked: Number(o?.locked ?? 0) },
+    rows: rows.map((r) => {
+      const staked = Number(r.a_stake) + Number(r.b_stake);
+      return { id: r.id, event: String(r.event ?? ""), sport: r.sport ?? "", books: [r.a_book, r.b_book], day: String(r.day), staked, returned: Number(r.returned), profit: Number(r.returned) - staked, status: r.status };
+    }),
+  };
+}
+// ---- ARB P&L (end) ----
+
 const SCAN_KEY = Bun.env.ANTHROPIC_API_KEY ?? "";
 const SCAN_MODEL = Bun.env.ARB_SCAN_MODEL ?? "claude-sonnet-5-5";
 const scanTimes: number[] = [];
@@ -2464,6 +2485,10 @@ Bun.serve({
     if (url.pathname === "/api/tracker") {
       try { return Response.json({ rows: await trackerRows() }, { headers: { "cache-control": "no-store", ...sec } }); }
       catch (e: any) { console.error("tracker load failed:", e?.message ?? e); return Response.json({ error: "unavailable" }, { status: 500, headers: sec }); }
+    }
+    if (url.pathname === "/api/pnl") {
+      try { return Response.json(await pnlData(), { headers: { "cache-control": "no-store", ...sec } }); }
+      catch (e: any) { console.error("pnl failed:", e?.message ?? e); return Response.json({ rows: [], open: { n: 0, staked: 0, locked: 0 }, today: "" }, { headers: { "cache-control": "no-store", ...sec } }); }
     }
     if (url.pathname === "/api/live") {
       try { return Response.json(await liveScores(), { headers: { "cache-control": "no-store", ...sec } }); }

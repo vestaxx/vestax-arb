@@ -161,6 +161,42 @@
   .trbtn { appearance:none; border:1px solid var(--border); background:transparent; color:var(--fg); border-radius:999px; padding:7px 14px; font:600 .85rem Inter, sans-serif; cursor:pointer; }
   .trbtn:hover { border-color:#3a3f4b; }
   .trbtn.danger { color:var(--loss); margin-left:auto; }
+  .pnlbox { padding:14px; }
+  .pnl-head { display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; }
+  .pnl-month { font-weight:700; }
+  .pnl-nav { appearance:none; border:1px solid var(--border); background:var(--card2); color:var(--fg); width:38px; height:34px; border-radius:10px; font-size:1.1rem; cursor:pointer; }
+  .pnl-nav:disabled { opacity:.3; cursor:default; }
+  .pnl-dow, .pnl-grid { display:grid; grid-template-columns:repeat(7, minmax(0, 1fr)); gap:4px; }
+  .pnl-dow span { text-align:center; color:var(--muted); font-size:.68rem; letter-spacing:.06em; padding:2px 0 6px; }
+  .pnl-cell { min-height:60px; border:1px solid var(--border); border-radius:10px; padding:5px 6px; background:var(--card); display:flex; flex-direction:column; justify-content:space-between; font-size:.68rem; color:var(--muted); min-width:0; overflow:hidden; }
+  .pnl-cell.blank { border-color:transparent; background:transparent; }
+  .pnl-cell.has { cursor:pointer; }
+  .pnl-cell.win { background:rgba(34,197,94,.10); border-color:rgba(34,197,94,.35); }
+  .pnl-cell.loss { background:rgba(239,68,68,.10); border-color:rgba(239,68,68,.35); }
+  .pnl-cell.today { box-shadow:inset 0 0 0 1px var(--blue); }
+  .pnl-cell.sel { outline:2px solid var(--blue); }
+  .pnl-cell b { font-family:var(--mono); font-size:.74rem; white-space:nowrap; }
+  .pnl-cell.win b { color:var(--win); } .pnl-cell.loss b { color:var(--loss); }
+  @media (max-width:480px) { .pnl-cell { padding:4px 3px; font-size:.62rem; } .pnl-cell b { font-size:.62rem; letter-spacing:-.02em; } .pnl-dow, .pnl-grid { gap:3px; } }
+  .pnl-foot { margin-top:10px; color:var(--muted); font-size:.8rem; line-height:1.5; }
+  .pnl-day { margin-top:12px; border-top:1px solid var(--border); padding-top:8px; }
+  .pnl-day h4 { margin:0 0 4px; font-size:.85rem; }
+  .pnl-row { display:flex; justify-content:space-between; gap:10px; padding:7px 2px; border-top:1px solid var(--border); font-size:.85rem; }
+  .pnl-row small { color:var(--muted); display:block; }
+  .pnl-row b { font-family:var(--mono); white-space:nowrap; }
+  .livebox { display:flex; align-items:center; justify-content:space-between; gap:14px; flex-wrap:wrap; padding:11px 16px; border-top:1px solid var(--border); background:#0e1118; }
+  .livebox .teams { display:grid; gap:3px; min-width:0; flex:1 1 180px; }
+  .livebox .tm { display:flex; justify-content:space-between; gap:16px; font-weight:600; font-size:.95rem; }
+  .livebox .tm span:first-child { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .livebox .tm.lead span:first-child { color:var(--fg); } .livebox .tm:not(.lead) span:first-child { color:var(--muted); }
+  .livebox .sc { font-family:var(--mono); font-weight:700; font-size:1.05rem; }
+  .livebox .st { display:flex; flex-direction:column; align-items:flex-end; gap:2px; text-align:right; font-size:.82rem; color:var(--muted); }
+  .livebox .chip { font-weight:800; letter-spacing:.06em; font-size:.72rem; color:var(--loss); }
+  .livebox .chip.final { color:var(--muted); } .livebox .chip.pre { color:var(--blue); }
+  .livebox .dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--loss); margin-right:6px; animation:livepulse 1.4s infinite; }
+  .livebox .big { color:var(--fg); font-weight:700; font-size:.92rem; }
+  .livebox.off { color:var(--muted); font-size:.8rem; }
+  @keyframes livepulse { 0% { opacity:1; } 50% { opacity:.25; } 100% { opacity:1; } }
   .trnote { padding:0 16px 12px; background:var(--card2); color:var(--muted); font-size:.8rem; line-height:1.45; }
   details.addbox { margin-top:4px; }
   details.addbox summary { cursor:pointer; list-style:none; display:inline-flex; align-items:center; padding:9px 16px; border:1px solid var(--border); border-radius:999px; font-weight:600; font-size:.9rem; background:var(--card); }
@@ -300,6 +336,16 @@
       <div class="tr-msg" id="trMsg"></div>
     </div>
   </details>
+
+  <h2 class="sec-title">Arb P&amp;L</h2>
+  <div class="tr-sum" id="pnlTiles"></div>
+  <section class="box pnlbox">
+    <div class="pnl-head"><button class="pnl-nav" id="pnlPrev" type="button">‹</button><div class="pnl-month" id="pnlMonthLbl"></div><button class="pnl-nav" id="pnlNext" type="button">›</button></div>
+    <div class="pnl-dow"><span>SUN</span><span>MON</span><span>TUE</span><span>WED</span><span>THU</span><span>FRI</span><span>SAT</span></div>
+    <div class="pnl-grid" id="pnlGrid"></div>
+    <div class="pnl-foot" id="pnlFoot"></div>
+    <div id="pnlDetail"></div>
+  </section>
 
   <h2 class="sec-title">Arbitrage Calculator</h2>
   <section class="box">
@@ -1283,6 +1329,84 @@
       '<div class="ret">pays ' + dollars(payout) + '</div>' + (t.status === "open" ? '<div class="ret" style="font-weight:700;color:var(--' + (payout - trTotal(t) >= 0 ? "win" : "loss") + ')">if wins ' + money(payout - trTotal(t)) + '</div>' : '') + '</div>' +
       '<span class="odds"><span class="logo lg-' + esc(book) + '">' + abbr + '</span>' + amer(odds) + '</span></div></div>';
   }
+  // ---------- arb P&L: realized profit per day (counted on the day each arb settled), month calendar + totals ----------
+  let pnl = { rows: [], open: { n: 0, staked: 0, locked: 0 }, today: "" }, pnlMonth = "", pnlSel = "";
+  const mny = (x) => (x < 0 ? "-$" : "+$") + Math.abs(x).toFixed(2);
+  // compact amount for the small calendar cells: whole dollars from $10 up, one decimal under $10, "k" from $1,000
+  const cmny = (x) => { const a = Math.abs(x); return (x < 0 ? "-$" : "+$") + (a >= 1000 ? (a / 1000).toFixed(1) + "k" : a >= 10 ? a.toFixed(0) : a.toFixed(1)); };
+  const pcol = (x) => x > 0 ? "var(--win)" : x < 0 ? "var(--loss)" : "var(--fg)";
+  function renderPnl() {
+    const rows = pnl.rows || [], curMonth = (pnl.today || new Date().toISOString().slice(0, 10)).slice(0, 7);
+    if (!pnlMonth) pnlMonth = curMonth;
+    const minMonth = rows.length ? rows.reduce((m, r) => (r.day.slice(0, 7) < m ? r.day.slice(0, 7) : m), curMonth) : curMonth;
+    const byDay = {};
+    rows.forEach((r) => { const d = byDay[r.day] || (byDay[r.day] = { n: 0, profit: 0, items: [] }); d.n++; d.profit += r.profit; d.items.push(r); });
+    const inMonth = rows.filter((r) => r.day.slice(0, 7) === pnlMonth);
+    const sum = (a, f) => a.reduce((s, r) => s + f(r), 0);
+    const mProfit = sum(inMonth, (r) => r.profit), mStaked = sum(inMonth, (r) => r.staked), aProfit = sum(rows, (r) => r.profit);
+    const mdays = Object.keys(byDay).filter((d) => d.slice(0, 7) === pnlMonth);
+    const best = mdays.reduce((b, d) => (!b || byDay[d].profit > byDay[b].profit ? d : b), "");
+    const [y, m] = pnlMonth.split("-").map(Number);
+    $("pnlMonthLbl").textContent = new Date(y, m - 1, 1).toLocaleString("en-US", { month: "long", year: "numeric" });
+    $("pnlPrev").disabled = pnlMonth <= minMonth; $("pnlNext").disabled = pnlMonth >= curMonth;
+    const tile = (lbl, big, color, small) => '<div class="ocard"><span class="lbl">' + lbl + '</span><div class="big" style="color:' + color + '">' + big + '</div><div class="small">' + small + '</div></div>';
+    $("pnlTiles").innerHTML =
+      tile("PROFIT THIS MONTH", mny(mProfit), pcol(mProfit), inMonth.length + " arb" + (inMonth.length === 1 ? "" : "s") + " settled") +
+      tile("PROFIT ALL TIME", mny(aProfit), pcol(aProfit), rows.length + " arbs settled") +
+      tile("RETURN THIS MONTH", mStaked > 0 ? (mProfit / mStaked * 100).toFixed(1) + "%" : "-", pcol(mProfit), "profit / money used") +
+      tile("BEST DAY", best ? mny(byDay[best].profit) : "-", best ? pcol(byDay[best].profit) : "var(--fg)", best ? best.slice(5) : "no settled arbs yet");
+    const first = new Date(y, m - 1, 1).getDay(), dim = new Date(y, m, 0).getDate();
+    let cells = "";
+    for (let i = 0; i < first; i++) cells += '<div class="pnl-cell blank"></div>';
+    for (let d = 1; d <= dim; d++) {
+      const key = pnlMonth + "-" + String(d).padStart(2, "0"), x = byDay[key];
+      const cls = "pnl-cell" + (x ? " has " + (x.profit >= 0 ? "win" : "loss") : "") + (key === pnl.today ? " today" : "") + (key === pnlSel ? " sel" : "");
+      cells += '<div class="' + cls + '"' + (x ? ' data-day="' + key + '"' : "") + '><span>' + d + '</span>' + (x ? '<b>' + cmny(x.profit) + '</b><span>' + x.n + ' arb' + (x.n > 1 ? "s" : "") + '</span>' : "") + '</div>';
+    }
+    $("pnlGrid").innerHTML = cells;
+    const o = pnl.open || {};
+    $("pnlFoot").innerHTML = "Profit counts on the day each arb settled. Right now: " + (o.n || 0) + " open, $" + Number(o.staked || 0).toFixed(2) + " in play, " + mny(Number(o.locked || 0)) + " locked in if they all settle clean.";
+    const sel = byDay[pnlSel];
+    $("pnlDetail").innerHTML = sel ? '<div class="pnl-day"><h4>' + esc(pnlSel) + ' · ' + mny(sel.profit) + ' on ' + sel.n + ' arb' + (sel.n > 1 ? "s" : "") + '</h4>' +
+      sel.items.map((r) => '<div class="pnl-row"><span>' + esc(r.event) + '<small>' + esc((r.books || []).join(" + ")) + ' · $' + Number(r.staked).toFixed(2) + ' used' + (r.status === "other" ? ' · not a clean win' : '') + '</small></span><b style="color:' + pcol(r.profit) + '">' + mny(r.profit) + '</b></div>').join("") + '</div>' : "";
+  }
+  async function loadPnl() {
+    try { const d = await (await fetch("/api/pnl", { cache: "no-store" })).json(); if (d && Array.isArray(d.rows)) { pnl = d; renderPnl(); } } catch (e) { /* keep what is on screen */ }
+  }
+  $("pnlPrev").addEventListener("click", () => { const [y, m] = pnlMonth.split("-").map(Number); const d = new Date(y, m - 2, 1); pnlMonth = d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0"); pnlSel = ""; renderPnl(); });
+  $("pnlNext").addEventListener("click", () => { const [y, m] = pnlMonth.split("-").map(Number); const d = new Date(y, m, 1); pnlMonth = d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0"); pnlSel = ""; renderPnl(); });
+  $("pnlGrid").addEventListener("click", (e) => { const c = e.target.closest("[data-day]"); if (!c) return; const k = c.getAttribute("data-day"); pnlSel = pnlSel === k ? "" : k; renderPnl(); });
+
+  // ---------- live score box (open arbs): teams, score, quarter / inning / set and clock, read from Bovada's scoreboard ----------
+  let liveMap = {};
+  function liveInner(l) {
+    if (!l) return "Checking the live score…";
+    if (!l.found) return "No live score feed for this game right now.";
+    const a = l.away.score, h = l.home.score, hasScore = a != null && h != null;
+    const lead = (x, y) => hasScore && Number(x) > Number(y) ? " lead" : "";
+    const chip = l.status === "final" ? '<span class="chip final">FINAL</span>' : l.status === "live" ? '<span class="chip"><span class="dot"></span>LIVE</span>' : '<span class="chip pre">NOT STARTED</span>';
+    return '<div class="teams"><div class="tm' + lead(a, h) + '"><span>' + esc(l.away.name) + '</span><span class="sc">' + (hasScore ? esc(a) : "") + '</span></div>' +
+      '<div class="tm' + lead(h, a) + '"><span>' + esc(l.home.name) + '</span><span class="sc">' + (hasScore ? esc(h) : "") + '</span></div></div>' +
+      '<div class="st">' + chip + (l.detail ? '<span class="big">' + esc(l.detail) + '</span>' : "") + (l.extra ? '<span>' + esc(l.extra) + '</span>' : "") + (l.sets ? '<span>score shown is sets</span>' : "") + '</div>';
+  }
+  function liveBox(t) {
+    const l = liveMap[t.id];
+    return '<div class="livebox' + (l && l.found ? "" : " off") + '" data-live="' + t.id + '">' + liveInner(l) + '</div>';
+  }
+  function paintLive() {
+    document.querySelectorAll("[data-live]").forEach((el) => {
+      const l = liveMap[el.getAttribute("data-live")];
+      el.className = "livebox" + (l && l.found ? "" : " off");
+      el.innerHTML = liveInner(l);
+    });
+  }
+  async function loadLive() {
+    if (document.hidden || !tracks.some((t) => t.status === "open")) return;
+    try {
+      const d = await (await fetch("/api/live", { cache: "no-store" })).json();
+      const m = {}; (d.rows || []).forEach((r) => { m[r.id] = r; }); liveMap = m; paintLive();
+    } catch (e) { /* keep the last scores on screen */ }
+  }
   function trCard(t) {
     const open = t.status === "open";
     const profit = open ? trLocked(t) : trProfit(t);
@@ -1294,7 +1418,7 @@
       '<div class="pct"><b' + neg + '>' + (pct >= 0 ? "+" : "-") + Math.abs(pct).toFixed(2) + '%</b><span class="pill"' + neg + '>' + money(profit) + '</span></div>' +
       '<div class="when">' + chip + '</div>' +
       '<div><div class="sport">' + ICON(t.sport) + ' ' + esc(t.sport || "") + (t.league ? ' · ' + esc(t.league) : '') + (t.event_start ? ' · ' + esc(when(t.event_start)) : ' <span style="color:var(--loss);font-weight:700">· LIVE BET</span>') + '</div><div class="mkt">' + esc(t.event) + '</div></div>' +
-      '<div class="vs">' + sub + 'in ' + dollars(trTotal(t)) + '<br/>' + (open ? "payout " + dollars(Math.min(t.a_payout, t.b_payout)) + " either way" : "returned " + dollars(t.returned)) + '</div></div>' +
+      '<div class="vs">' + sub + 'in ' + dollars(trTotal(t)) + '<br/>' + (open ? "payout " + dollars(Math.min(t.a_payout, t.b_payout)) + " either way" : "returned " + dollars(t.returned)) + '</div></div>' + (open ? liveBox(t) : "") +
       '<div class="legs">' + trLeg("a", t) + trLeg("b", t) + '</div>';
     if (t.note) h += '<div class="trnote">' + esc(t.note) + '</div>';
     h += '<div class="trbtns">';
@@ -1322,6 +1446,7 @@
     $("trRoi").textContent = used ? (100 * realized / used).toFixed(2) + "%" : "-";
     $("trIn").textContent = dollars(inOpen);
     $("trList").innerHTML = tracks.length ? tracks.map(trCard).join("") : '<div class="empty">No arbs tracked yet.<br/>Tap "Add an arb" below after you place one.</div>';
+    paintLive();
   }
   async function loadTracker() {
     try {
@@ -1366,7 +1491,7 @@
       await loadTracker();
     } catch (err) { $("trMsg").textContent = (err && err.message) ? err.message : "Couldn't save."; }
   });
-  loadTracker(); setInterval(loadTracker, 60000);
+  loadTracker().then(loadLive); loadPnl(); setInterval(loadTracker, 60000); setInterval(loadLive, 6000); setInterval(loadPnl, 60000);
 
   // ---------- manual arbitrage calculator (runs in the browser only) ----------
   // Polymarket: buying 1 share at price p costs p (+ taker fee 0.0695*p*(1-p)) and pays $1 if it wins.
