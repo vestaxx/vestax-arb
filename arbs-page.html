@@ -161,6 +161,8 @@
   .trbtn { appearance:none; border:1px solid var(--border); background:transparent; color:var(--fg); border-radius:999px; padding:7px 14px; font:600 .85rem Inter, sans-serif; cursor:pointer; }
   .trbtn:hover { border-color:#3a3f4b; }
   .trbtn.danger { color:var(--loss); margin-left:auto; }
+  .pnl-top { display:flex; align-items:center; justify-content:space-between; margin:22px 0 10px; }
+  .pnl-toggle { appearance:none; border:1px solid var(--border); background:var(--card); color:var(--muted); border-radius:10px; padding:6px 12px; font:600 .8rem Inter, sans-serif; cursor:pointer; }
   .pnlbox { padding:14px; }
   .pnl-head { display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; }
   .pnl-month { font-weight:700; }
@@ -268,6 +270,21 @@
     </div>
     <span class="pulse" id="pulse">connecting</span>
   </header>
+  <div class="pnl-top">
+    <h2 class="sec-title" style="margin:0">Arb P&amp;L</h2>
+    <button class="pnl-toggle" id="pnlToggle" type="button">Hide</button>
+  </div>
+  <div id="pnlWrap">
+  <div class="tr-sum" id="pnlTiles"></div>
+  <section class="box pnlbox">
+    <div class="pnl-head"><button class="pnl-nav" id="pnlPrev" type="button">‹</button><div class="pnl-month" id="pnlMonthLbl"></div><button class="pnl-nav" id="pnlNext" type="button">›</button></div>
+    <div class="pnl-dow"><span>SUN</span><span>MON</span><span>TUE</span><span>WED</span><span>THU</span><span>FRI</span><span>SAT</span></div>
+    <div class="pnl-grid" id="pnlGrid"></div>
+    <div class="pnl-foot" id="pnlFoot"></div>
+    <div id="pnlDetail"></div>
+  </section>
+  </div>
+
   <div class="controls">
     <div class="seg">
       <button id="tPre" class="on">Pre-Match<span class="n" id="nPre">0</span></button>
@@ -336,16 +353,6 @@
       <div class="tr-msg" id="trMsg"></div>
     </div>
   </details>
-
-  <h2 class="sec-title">Arb P&amp;L</h2>
-  <div class="tr-sum" id="pnlTiles"></div>
-  <section class="box pnlbox">
-    <div class="pnl-head"><button class="pnl-nav" id="pnlPrev" type="button">‹</button><div class="pnl-month" id="pnlMonthLbl"></div><button class="pnl-nav" id="pnlNext" type="button">›</button></div>
-    <div class="pnl-dow"><span>SUN</span><span>MON</span><span>TUE</span><span>WED</span><span>THU</span><span>FRI</span><span>SAT</span></div>
-    <div class="pnl-grid" id="pnlGrid"></div>
-    <div class="pnl-foot" id="pnlFoot"></div>
-    <div id="pnlDetail"></div>
-  </section>
 
   <h2 class="sec-title">Arbitrage Calculator</h2>
   <section class="box">
@@ -1373,6 +1380,10 @@
   async function loadPnl() {
     try { const d = await (await fetch("/api/pnl", { cache: "no-store" })).json(); if (d && Array.isArray(d.rows)) { pnl = d; renderPnl(); } } catch (e) { /* keep what is on screen */ }
   }
+  // Hide / Show the whole P&L block (remembered between visits)
+  function applyPnlHidden(hide) { $("pnlWrap").style.display = hide ? "none" : ""; $("pnlToggle").textContent = hide ? "Show" : "Hide"; }
+  try { applyPnlHidden(localStorage.getItem("pnlHidden") === "1"); } catch (e) { applyPnlHidden(false); }
+  $("pnlToggle").addEventListener("click", () => { const hide = $("pnlWrap").style.display !== "none"; applyPnlHidden(hide); try { localStorage.setItem("pnlHidden", hide ? "1" : "0"); } catch (e) { /* ignore */ } });
   $("pnlPrev").addEventListener("click", () => { const [y, m] = pnlMonth.split("-").map(Number); const d = new Date(y, m - 2, 1); pnlMonth = d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0"); pnlSel = ""; renderPnl(); });
   $("pnlNext").addEventListener("click", () => { const [y, m] = pnlMonth.split("-").map(Number); const d = new Date(y, m, 1); pnlMonth = d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0"); pnlSel = ""; renderPnl(); });
   $("pnlGrid").addEventListener("click", (e) => { const c = e.target.closest("[data-day]"); if (!c) return; const k = c.getAttribute("data-day"); pnlSel = pnlSel === k ? "" : k; renderPnl(); });
