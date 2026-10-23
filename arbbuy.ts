@@ -43,6 +43,7 @@ const TT_END_HOUR = Number(Bun.env.ARB_TT_END_HOUR ?? 5);
 const ptHour = () => Number(new Intl.DateTimeFormat("en-US", { timeZone: "America/Los_Angeles", hour: "numeric", hourCycle: "h23" }).format(new Date()));
 const AUTO_MAX_PER_DAY = Number(Bun.env.ARB_AUTO_MAX_PER_DAY ?? 10); // most auto-buys in any 24 hours
 const AUTO_SKIP = new RegExp(Bun.env.ARB_AUTO_SKIP ?? "darts", "i"); // sports auto-fire never buys (live-only now, so tennis/boxing/MMA are allowed; set ARB_AUTO_SKIP=darts|boxing|... to change); table tennis is exempt below
+const missNoted = new Map<string, number>();
 const ROUTINE = /isn't active|No fresh Goated|only .* edge|edge is only|no longer|above the break-even|already running|just bought|no open price|no usable price/i;
 
 export function makeArbBuy(d: Deps) {
@@ -309,6 +310,11 @@ export function makeArbBuy(d: Deps) {
     } catch (e: any) {
       const msg = String(e?.message ?? e);
       if (!ROUTINE.test(msg)) note(`skipped ${key}: ${msg.slice(0, 140)}`);
+      else if (Date.now() - (missNoted.get(key) ?? 0) > 60000) {
+        // the "routine" reasons (edge too small on the fresh prices, price moved, arb gone) used to be silent, so a failed attempt left no trace; log each once a minute
+        missNoted.set(key, Date.now());
+        note(`missed ${key} at ${pct.toFixed(1)}% on the scan: ${msg.slice(0, 140)}`);
+      }
     }
   }
 

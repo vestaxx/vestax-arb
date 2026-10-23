@@ -392,6 +392,15 @@ async function pmDepth(slug: string, long: boolean, dPm: number, dGt: number, to
   const depth = sized ? depthCash(levels, breakEvenPrice((sized.sg + sized.sp) / sized.sg)) : 0;
   return { ok: !!sized && sized.sg + sized.sp >= LIST_MIN_TOTAL, depth, need, size: sized ? sized.sg + sized.sp : 0 };
 }
+// logs why a 2%+ arb was dropped for thin depth (at most once per 2 minutes per game), so a vanished arb always leaves a reason in the log
+const dropAt = new Map<string, number>();
+function dropNote(label: string, pct: number, dp: { depth?: number; size?: number }) {
+  if (pct < 2) return;
+  const now = Date.now();
+  if (now - (dropAt.get(label) ?? 0) < 120000) return;
+  dropAt.set(label, now);
+  console.log(`DROP ${label}: ${pct.toFixed(1)}% edge, but Polymarket's book is too thin for a safe size (room about $${Math.round(dp.depth ?? 0)}, biggest safe total $${Math.round(dp.size ?? 0)})`);
+}
 // ---- DEPTH-AWARE SIZING (end) ----
 const alerted = new Map<string, number>();
 async function ntfy(title: string, body: string, priority = "high", click?: string | null, actions?: string): Promise<boolean> {
@@ -1731,7 +1740,7 @@ async function scan(): Promise<number> {
         noteClose(pct, label);
         if (pct <= 0 || pct > FEED_MAX_PCT) continue;
         const dp = await pmDepth(pg.slug, leg.side === "a", dPm, leg.dGt, leg.liq);
-        if (!dp.ok) continue;
+        if (!dp.ok) { dropNote(label, pct, dp); continue; }
         const key = "ME|" + pg.slug + "|" + leg.side;
         hits.push(key);
         const pmLong = leg.side === "a";
@@ -1828,7 +1837,7 @@ async function scan(): Promise<number> {
         // `j.feed &&` gate here was a real gap, not a deliberate scope limit.
         if (pct > FEED_MAX_PCT) { capSkip++; continue; }
         const dp = await pmDepth(t.slug, c.side === "o", dPm, c.gtOdds, liq);
-        if (!dp.ok) { lqSkip++; continue; }
+        if (!dp.ok) { lqSkip++; dropNote(String(t.slug), pct, dp); continue; }
         const key = "T|" + t.slug + "|" + c.side + (c.gap > 0 ? "-mid" + c.otherLine : "") + sfx;
         keys.add(key);
         tstat.arbs++;
@@ -1907,7 +1916,7 @@ async function scan(): Promise<number> {
         // see the comment on the moneyline check below -- this cap must apply regardless of source
         if (pct > FEED_MAX_PCT) { capSkip++; continue; }
         const dp = await pmDepth(t.slug, pmLong, dPm, c.gtOdds, liq);
-        if (!dp.ok) { lqSkip++; continue; }
+        if (!dp.ok) { lqSkip++; dropNote(String(t.slug), pct, dp); continue; }
         const key = "S|" + t.slug + "|" + c.side + sfx;
         keys.add(key);
         sstat.arbs++;
@@ -1992,7 +2001,7 @@ async function scan(): Promise<number> {
             // unconditionally; removing j.feed here closes the gap for every path at once.
             if (pct > FEED_MAX_PCT) { capSkip++; if (WATCH && WATCH.test(label)) console.log(`WATCH ${label}: skipped, edge ${pct.toFixed(2)}% is over the ${FEED_MAX_PCT}% sanity cap`); continue; }
             const dp = await pmDepth(j.wm.slug, leg.side === "a", dPm, dGt, leg.liq);
-            if (!dp.ok) { lqSkip++; if (WATCH && WATCH.test(label)) console.log(`WATCH ${label}: skipped, Polymarket depth too thin for the bankroll test (depth $${Math.round(dp.depth || 0)})`); continue; }
+            if (!dp.ok) { lqSkip++; dropNote(label, pct, dp); if (WATCH && WATCH.test(label)) console.log(`WATCH ${label}: skipped, Polymarket depth too thin for the bankroll test (depth $${Math.round(dp.depth || 0)})`); continue; }
             const key = j.wm.slug + "|" + leg.side + sfx;
             hits.push(key);
             const pmLong = leg.side === "a";
