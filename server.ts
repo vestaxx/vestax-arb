@@ -993,22 +993,9 @@ function bvdCollect(ev: any, live: boolean, teams: string[], alt: boolean, out: 
   }
   out.totals = Object.values(tot);
 }
-// Every Bovada game we have seen (live ones included, even when their price list is too stale to trade on), kept ONLY so the live score box can find a game's scoreboard.
-// The arb feed above drops live games whose prices are over BVD_LIVE_MAX_AGE old, and those used to have no score either.
-const bvdScoreIdx = new Map<string, { at: number; ev: FeedEv }>();
-function bvdIndexEvent(ev: any) {
-  if (ev?.id == null) return;
-  let teams: string[] = (ev?.competitors ?? []).map((c: any) => String(c?.name ?? "").trim()).filter(Boolean);
-  if (teams.length !== 2) { const p = String(ev?.description ?? "").split(/\s+(?:@|vs\.?|v)\s+/i); teams = p.length === 2 ? [p[0].trim(), p[1].trim()] : []; }
-  if (teams.length !== 2 || teams[0] === teams[1]) return;
-  const homeC = (ev?.competitors ?? []).find((c: any) => c?.home === true);
-  const st = Number(ev.startTime);
-  bvdScoreIdx.set(String(ev.id), { at: Date.now(), ev: { teams: [teams[0], teams[1]], spreads: [], totals: [], ml: {}, live: !!ev.live, bid: String(ev.id), home: homeC?.name ? String(homeC.name).trim() : undefined, start: Number.isFinite(st) && st > 1e11 ? st : undefined } as FeedEv });
-  if (bvdScoreIdx.size > 6000) for (const [k, x] of bvdScoreIdx) if (Date.now() - x.at > 12 * 3600e3) bvdScoreIdx.delete(k);
-}
+const diagNoted = new Map<string, number>();   // rate limit for the empty-sport note
 function bvdParse(ev: any, league: string): FeedEv | null {
   if (ev?.type && ev.type !== "GAMEEVENT") return null;
-  bvdIndexEvent(ev);
   const live = !!ev?.live;
   // BVD_LIVE was turned on, but every live candidate is STILL being rejected (confirmed via
   // FEED-NOMATCH-ZERO: liveMiss = pool size, every single time, even after the toggle and a fresh
@@ -1032,9 +1019,6 @@ function bvdParse(ev: any, league: string): FeedEv | null {
   if (teams.length !== 2 || teams[0] === teams[1]) return null;
   const out: FeedEv = { teams: [teams[0], teams[1]], spreads: [], totals: [], ml: {}, live, league: league || undefined, sport: BVD_CODE[String(ev.sport)] };
   if (Number.isFinite(st) && st > 1e11) out.start = st;
-  if (ev.id != null) out.bid = String(ev.id);
-  const homeC = (ev?.competitors ?? []).find((c: any) => c?.home === true);
-  if (homeC?.name) out.home = String(homeC.name).trim();
   if (ev.link) { out.link = String(ev.link); out.url = BVD_HOST + "/sports" + out.link; }
   bvdCollect(ev, live, teams, false, out);
   // soccer totals-only: a 3-way moneyline (or an Asian handicap that can push) is exactly the tie
@@ -1057,6 +1041,13 @@ async function bvdLoad(path: string): Promise<{ ok: boolean; state: string }> {
         if (!p) { skipped++; continue; }
         feeds.bovada.set(String(ev.id ?? p.teams.join("|")), { at: Date.now(), ev: p });
         n++;
+      }
+    }
+    if (n + skipped === 0) {   // a sport that answers HTTP 200 but lists nothing (tennis did this): say what the answer looked like, at most every 10 minutes
+      const key = "empty:" + path;
+      if (Date.now() - (diagNoted.get(key) ?? 0) > 600000) {
+        diagNoted.set(key, Date.now());
+        console.log(`BOVADA-DIAG ${path}: HTTP ${r.status} but no games in it | ${Array.isArray(j) ? j.length + " top-level groups" : "not a list"} | starts: ${JSON.stringify(j).slice(0, 260)}`);
       }
     }
     return { ok: true, state: "ok " + n + (skipped ? " (skipped " + skipped + " live/started/unreadable)" : "") };
@@ -2217,6 +2208,22 @@ const AUTO_SETTLE_MIN = Number(Bun.env.ARB_AUTO_SETTLE_MIN ?? 15);
 const AUTO_SETTLE_MAX_EDGE = Number(Bun.env.ARB_AUTO_SETTLE_MAX_EDGE ?? 8);
 const settleNoted = new Set<string>();
 const unsettledAt = new Map<number, number>();
+const waitingAt = new Map<number, number>();
+const nudged = new Set<number>();
+// a card whose Polymarket market hasn't settled yet used to say nothing at all. Log what Polymarket reports for it (once an hour) so "waiting" and "can't read it"
+// look different, and after 10 hours tell the phone once, so a card that is finished on Polymarket but not here gets noticed.
+async function waiting(t: any, slug: string) {
+  const now = Date.now();
+  if (now - (waitingAt.get(t.id) ?? 0) < 3600e3) return;
+  waitingAt.set(t.id, now);
+  let info = "";
+  try { const md: any = (await pm.markets.bbo(slug))?.marketData ?? {}; info = `state=${md.state ?? md.status ?? "?"} settlementPx=${JSON.stringify(md.settlementPx ?? null)} fields=${Object.keys(md).slice(0, 12).join(",")}`; }
+  catch (e: any) { info = `bbo error: ${String(e?.message ?? e).slice(0, 120)}`; }
+  const startMs = t.event_start ? new Date(t.event_start).getTime() : new Date(t.placed_at).getTime();
+  const hrs = (now - startMs) / 3600e3;
+  console.log(`ARB-SETTLE #${t.id} ${t.event}: waiting, Polymarket hasn't settled ${slug} (started ${hrs.toFixed(1)} h ago) | ${info}`);
+  if (hrs > 10 && !nudged.has(t.id)) { nudged.add(t.id); void ntfy(`Still open: ${t.event}`, `Polymarket still shows ${slug} as unsettled ${hrs.toFixed(0)} hours after the start. If it has paid out on Polymarket and the books, settle the card by hand.`, "default"); }
+}
 // a card the auto-settle can't handle used to stay open in silence; log it (once per 3 hours) and, once the game is 4+ hours old, tell the phone
 function unsettled(t: any, why: string) {
   const now = Date.now();
@@ -2228,7 +2235,7 @@ function unsettled(t: any, why: string) {
 }
 // find the Polymarket market (and which side you hold) for a game by its two team names, from the games the scanner currently has listed
 function findPmMarket(event: string, pmPick: string): { slug: string; long: boolean } | null {
-  const hit = (team: string) => { const t = liveToks(team); if (!t.length) return false; const hay = new Set(liveToks(event)); return t.every((w) => hay.has(w)); };
+  const hit = (team: string) => { const t = nameToks(team); if (!t.length) return false; const hay = new Set(nameToks(event)); return t.every((w) => hay.has(w)); };
   const found: any[] = [];
   for (const arr of [pmGames, pmNameGames]) for (const g of arr ?? []) {
     const L = g?.L?.description, S = g?.S?.description, slug = g?.wm?.slug;
@@ -2288,7 +2295,7 @@ async function settleOpenArbs() {
       }
       if (!slug || pmLong === null) { unsettled(t, "I can't find this game's Polymarket market (it was never listed on the scanner and wasn't recognised when you added it)"); continue; }
       const v = await pmSettlementValue(slug);
-      if (v === null) continue; // not resolved yet
+      if (v === null) { void waiting(t, slug); continue; } // not resolved yet
       const total = Number(t.a_stake) + Number(t.b_stake);
       const edge = (Math.min(Number(t.a_payout), Number(t.b_payout)) / total - 1) * 100;
       const noteOnce = (kind: string, title: string, body: string) => {
@@ -2327,97 +2334,8 @@ setTimeout(() => void settleOpenArbs(), 60_000);
 setInterval(() => void settleOpenArbs(), AUTO_SETTLE_MIN * 60_000);
 // ---- AUTO-SETTLE (end) ----
 
-// ---- LIVE SCORES (start) ----
-// The live score box on the arbs page: for every OPEN tracker arb, find the same game in Bovada's feed (the feed keeps Bovada's event id and which team is
-// home), then read Bovada's scoreboard for it: score, quarter / inning / set, game clock. Read-only, cached for a few seconds.
-const LIVE_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36";
-const liveCache = new Map<string, { at: number; v: any }>();
-const liveToks = (x: string) => String(x ?? "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").split(/[^a-z0-9]+/).filter((w) => w.length > 2);
-function teamHit(team: string, text: string) {
-  const t = liveToks(team); if (!t.length) return false;
-  const hay = new Set(liveToks(text));
-  return t.filter((w) => hay.has(w)).length >= Math.max(1, Math.ceil(t.length / 2));
-}
-function findBvd(event: string, startMs: number | null): { id: string; ev: FeedEv } | null {
-  let best: { id: string; ev: FeedEv } | null = null, bestScore = -1;
-  for (const [, v] of bvdScoreIdx) {
-    if (Date.now() - v.at > 12 * 3600e3) continue;
-    const e = v.ev;
-    if (!e.bid || !(teamHit(e.teams[0], event) && teamHit(e.teams[1], event))) continue;
-    let sc = e.live ? 2 : 0;
-    if (startMs && e.start) { const d = Math.abs(e.start - startMs) / 3600e3; if (d > 36) continue; sc += 1 - d / 36; } else sc += 0.5;
-    if (sc > bestScore) { best = { id: e.bid, ev: e }; bestScore = sc; }
-  }
-  return best;
-}
-const liveNoted = new Map<string, number>();
-function liveNote(key: string, text: string, everyMs = 600000) {
-  if (Date.now() - (liveNoted.get(key) ?? 0) < everyMs) return;
-  liveNoted.set(key, Date.now());
-  console.log(`LIVE-SCORE ${text}`);
-}
-async function bvdBoard(bid: string): Promise<any | null> {
-  const hit = liveCache.get(bid);
-  if (hit && Date.now() - hit.at < 4000) return hit.v;
-  let v: any = null;
-  for (const accept of ["application/vnd.scoreboards.full+json", "application/vnd.scoreboards.summary+json"]) {
-    try {
-      const r = await fetch(`${BVD_HOST}/services/sports/results/api/v1/scores/${encodeURIComponent(bid)}`, { headers: { "user-agent": LIVE_UA, accept, referer: BVD_HOST + "/" }, signal: AbortSignal.timeout(6000) });
-      if (r.status === 200) { v = await r.json().catch(() => null); if (v) break; }
-      else liveNote("http" + r.status, `Bovada's scoreboard answered HTTP ${r.status} (game ${bid}, ${accept.includes("full") ? "full" : "summary"} format)`);
-    } catch (e: any) { liveNote("err", `scoreboard request failed: ${String(e?.message ?? e).slice(0, 100)}`); }
-  }
-  liveCache.set(bid, { at: Date.now(), v });
-  if (liveCache.size > 300) for (const [k, x] of liveCache) if (Date.now() - x.at > 60000) liveCache.delete(k);
-  return v;
-}
-function liveShape(j: any, ev: FeedEv) {
-  const ls = j?.latestScore ?? {}, c = j?.clock ?? {}, cur = j?.currentPeriodScore ?? null;
-  const per = String(c.period ?? "").trim(), sport = String(j?.sport ?? "").toUpperCase();
-  const homeName = ev.home ?? ev.teams[1];
-  const awayName = ev.teams[0] === homeName ? ev.teams[1] : ev.teams[0];
-  const final = /^(final|finished|ended|complete|ft)/i.test(per);
-  const sets = /TENN|TABL|VOLL|BADM|DART/.test(sport);          // sets / games sports: the headline score is sets, then the current game
-  const prev = (Array.isArray(j?.previousPeriodsScore) ? j.previousPeriodsScore : []).map((p: any) => `${p?.visitor}-${p?.home}`);
-  let detail = "", extra = "";
-  if (final) detail = "Final";
-  else if (sets) {
-    detail = cur ? `Game ${Number(c.periodNumber) || prev.length + 1}: ${cur.visitor}-${cur.home}` : per;      // numbers read away-home, the same order as the box on the page
-    extra = prev.length ? "Earlier games: " + prev.join(", ") : "";
-  } else {
-    detail = [/^\d+$/.test(per) ? "Period " + per : per, String(c.gameTime ?? "").trim()].filter(Boolean).join(" ");
-    const sd = j?.sportDetails && typeof j.sportDetails === "object" ? Object.entries(j.sportDetails).filter(([, x]) => x !== null && typeof x !== "object" && String(x) !== "").slice(0, 5) : [];
-    extra = sd.map(([k, x]) => `${k} ${x}`).join(" · ");
-  }
-  const hasScore = ls.home != null && ls.visitor != null;
-  return {
-    found: true, status: final ? "final" : ev.live || hasScore ? "live" : "pre",
-    home: { name: homeName, score: ls.home ?? null }, away: { name: awayName, score: ls.visitor ?? null },
-    detail, extra, sets, ticking: !!c.isTicking, updated: Date.now(),
-  };
-}
-async function liveScores() {
-  const rows: any[] = await sql`SELECT id, event, event_start FROM arb_tracker WHERE status = 'open' ORDER BY placed_at`;
-  const out = await Promise.all(rows.map(async (t: any) => {
-    const hit = findBvd(String(t.event), t.event_start ? new Date(t.event_start).getTime() : null);
-    if (!hit) { liveNote("nomatch:" + t.event, `no Bovada game found for "${t.event}" (open bet)`); return { id: t.id, found: false }; }
-    const j = await bvdBoard(hit.id);
-    if (!j) { liveNote("noboard:" + hit.id, `found Bovada game ${hit.id} for "${t.event}" but its scoreboard wouldn't load`); return { id: t.id, found: false }; }
-    return { id: t.id, ...liveShape(j, hit.ev) };
-  }));
-  // the live arbs on the scanner's Live tab get the same score line (best ones first, capped so a busy night can't flood Bovada with requests)
-  const live: any[] = await sql`SELECT id, player_a, player_b, start_time FROM arb_opps WHERE active AND is_live AND profit_pct >= 1 ORDER BY profit_pct DESC LIMIT 12`;
-  const arbs: Record<string, any> = {};
-  await Promise.all(live.map(async (r: any) => {
-    const name = `${r.player_a} vs ${r.player_b}`;
-    const hit = findBvd(name, r.start_time ? new Date(r.start_time).getTime() : null);
-    if (!hit) { liveNote("nomatch:" + name, `no Bovada game found for "${name}" (live arb card)`); arbs[r.id] = { found: false }; return; }
-    const j = await bvdBoard(hit.id);
-    arbs[r.id] = j ? liveShape(j, hit.ev) : { found: false };
-  }));
-  return { rows: out, arbs };
-}
-// ---- LIVE SCORES (end) ----
+// small name helper (used when a card is added, to find its Polymarket market)
+const nameToks = (x: string) => String(x ?? "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").split(/[^a-z0-9]+/).filter((w) => w.length > 2);
 
 // ---- ARB P&L (start) ----
 // Realized profit for the P&L calendar on the arbs page: every settled tracker arb, on the day (Pacific) it settled. profit = money returned - both stakes.
@@ -2563,10 +2481,6 @@ Bun.serve({
     if (url.pathname === "/api/pnl") {
       try { return Response.json(await pnlData(), { headers: { "cache-control": "no-store", ...sec } }); }
       catch (e: any) { console.error("pnl failed:", e?.message ?? e); return Response.json({ rows: [], open: { n: 0, staked: 0, locked: 0 }, today: "" }, { headers: { "cache-control": "no-store", ...sec } }); }
-    }
-    if (url.pathname === "/api/live") {
-      try { return Response.json(await liveScores(), { headers: { "cache-control": "no-store", ...sec } }); }
-      catch (e: any) { console.error("live scores failed:", e?.message ?? e); return Response.json({ rows: [] }, { headers: { "cache-control": "no-store", ...sec } }); }
     }
     if (url.pathname === "/api/test-alert") {
       const ok = await ntfy("VeSTAX ARBS test alert", "Test alert: if you can read this, phone alerts are working.", "default", PAGE_URL, `view, Arbs page, ${PAGE_URL}`);

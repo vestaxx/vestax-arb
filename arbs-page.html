@@ -186,19 +186,6 @@
   .pnl-row { display:flex; justify-content:space-between; gap:10px; padding:7px 2px; border-top:1px solid var(--border); font-size:.85rem; }
   .pnl-row small { color:var(--muted); display:block; }
   .pnl-row b { font-family:var(--mono); white-space:nowrap; }
-  .livebox { display:flex; align-items:center; justify-content:space-between; gap:14px; flex-wrap:wrap; padding:11px 16px; border-top:1px solid var(--border); background:#0e1118; }
-  .livebox .teams { display:grid; gap:3px; min-width:0; flex:1 1 180px; }
-  .livebox .tm { display:flex; justify-content:space-between; gap:16px; font-weight:600; font-size:.95rem; }
-  .livebox .tm span:first-child { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .livebox .tm.lead span:first-child { color:var(--fg); } .livebox .tm:not(.lead) span:first-child { color:var(--muted); }
-  .livebox .sc { font-family:var(--mono); font-weight:700; font-size:1.05rem; }
-  .livebox .st { display:flex; flex-direction:column; align-items:flex-end; gap:2px; text-align:right; font-size:.82rem; color:var(--muted); }
-  .livebox .chip { font-weight:800; letter-spacing:.06em; font-size:.72rem; color:var(--loss); }
-  .livebox .chip.final { color:var(--muted); } .livebox .chip.pre { color:var(--blue); }
-  .livebox .dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--loss); margin-right:6px; animation:livepulse 1.4s infinite; }
-  .livebox .big { color:var(--fg); font-weight:700; font-size:.92rem; }
-  .livebox.off { color:var(--muted); font-size:.8rem; }
-  @keyframes livepulse { 0% { opacity:1; } 50% { opacity:.25; } 100% { opacity:1; } }
   .trnote { padding:0 16px 12px; background:var(--card2); color:var(--muted); font-size:.8rem; line-height:1.45; }
   details.addbox { margin-top:4px; }
   details.addbox summary { cursor:pointer; list-style:none; display:inline-flex; align-items:center; padding:9px 16px; border:1px solid var(--border); border-radius:999px; font-weight:600; font-size:.9rem; background:var(--card); }
@@ -814,7 +801,6 @@
         '<div class="when">' + (r.is_live ? '<span class="tag live">LIVE</span><span class="age">' + ageText(r.first_seen) + '</span>' + (r.start_time ? '<span class="age">started ' + when(r.start_time) + '</span>' : '') : when(r.start_time)) + (fresh ? '<span class="tag new">NEW</span>' : '') + '</div>' +
         '<div><div class="sport">' + ICON(r.sport) + ' ' + esc(r.sport) + (r.league ? ' · ' + esc(r.league) : '') + '</div><div class="mkt">' + esc(r.market) + '</div></div>' +
         '<div class="vs">' + esc(r.player_a) + ' vs<br/>' + esc(r.player_b) + '</div></div>' +
-        (r.is_live ? liveArbBox(r) : "") +
         (editingId === r.id
           ? '<div class="legs">' + legEditPair(r, sa, sb) + '</div>'
           : '<div class="legs">' + leg(r.player_a, r.book_a, r.odds_a, r.liq_a, sa, gj(r, "a", sa, sb), pmPairId, r.url_a) + leg(r.player_b, r.book_b, r.odds_b, r.liq_b, sb, gj(r, "b", sb, sa), pmPairId, r.url_b) + '</div>') +
@@ -1389,45 +1375,6 @@
   $("pnlNext").addEventListener("click", () => { const [y, m] = pnlMonth.split("-").map(Number); const d = new Date(y, m, 1); pnlMonth = d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0"); pnlSel = ""; renderPnl(); });
   $("pnlGrid").addEventListener("click", (e) => { const c = e.target.closest("[data-day]"); if (!c) return; const k = c.getAttribute("data-day"); pnlSel = pnlSel === k ? "" : k; renderPnl(); });
 
-  // ---------- live score box (open arbs): teams, score, quarter / inning / set and clock, read from Bovada's scoreboard ----------
-  let liveMap = {}, liveArbMap = {};
-  function liveInner(l) {
-    if (!l) return "Checking the live score…";
-    if (!l.found) return "No live score feed for this game right now.";
-    const a = l.away.score, h = l.home.score, hasScore = a != null && h != null;
-    const lead = (x, y) => hasScore && Number(x) > Number(y) ? " lead" : "";
-    const chip = l.status === "final" ? '<span class="chip final">FINAL</span>' : l.status === "live" ? '<span class="chip"><span class="dot"></span>LIVE</span>' : '<span class="chip pre">NOT STARTED</span>';
-    return '<div class="teams"><div class="tm' + lead(a, h) + '"><span>' + esc(l.away.name) + '</span><span class="sc">' + (hasScore ? esc(a) : "") + '</span></div>' +
-      '<div class="tm' + lead(h, a) + '"><span>' + esc(l.home.name) + '</span><span class="sc">' + (hasScore ? esc(h) : "") + '</span></div></div>' +
-      '<div class="st">' + chip + (l.detail ? '<span class="big">' + esc(l.detail) + '</span>' : "") + (l.extra ? '<span>' + esc(l.extra) + '</span>' : "") + (l.sets ? '<span>score shown is sets</span>' : "") + '</div>';
-  }
-  function liveArbBox(r) {
-    const l = liveArbMap[r.id];
-    return '<div class="livebox' + (l && l.found ? "" : " off") + '" data-livearb="' + r.id + '">' + liveInner(l) + '</div>';
-  }
-  function liveBox(t) {
-    const l = liveMap[t.id];
-    return '<div class="livebox' + (l && l.found ? "" : " off") + '" data-live="' + t.id + '">' + liveInner(l) + '</div>';
-  }
-  function paintLive() {
-    document.querySelectorAll("[data-live]").forEach((el) => {
-      const l = liveMap[el.getAttribute("data-live")];
-      el.className = "livebox" + (l && l.found ? "" : " off");
-      el.innerHTML = liveInner(l);
-    });
-    document.querySelectorAll("[data-livearb]").forEach((el) => {
-      const l = liveArbMap[el.getAttribute("data-livearb")];
-      el.className = "livebox" + (l && l.found ? "" : " off");
-      el.innerHTML = liveInner(l);
-    });
-  }
-  async function loadLive() {
-    if (document.hidden || (!tracks.some((t) => t.status === "open") && !rows.some((r) => r.is_live))) return;
-    try {
-      const d = await (await fetch("/api/live", { cache: "no-store" })).json();
-      const m = {}; (d.rows || []).forEach((r) => { m[r.id] = r; }); liveMap = m; liveArbMap = d.arbs || {}; paintLive();
-    } catch (e) { /* keep the last scores on screen */ }
-  }
   function trCard(t) {
     const open = t.status === "open";
     const profit = open ? trLocked(t) : trProfit(t);
@@ -1439,7 +1386,7 @@
       '<div class="pct"><b' + neg + '>' + (pct >= 0 ? "+" : "-") + Math.abs(pct).toFixed(2) + '%</b><span class="pill"' + neg + '>' + money(profit) + '</span></div>' +
       '<div class="when">' + chip + '</div>' +
       '<div><div class="sport">' + ICON(t.sport) + ' ' + esc(t.sport || "") + (t.league ? ' · ' + esc(t.league) : '') + (t.event_start ? ' · ' + esc(when(t.event_start)) : ' <span style="color:var(--loss);font-weight:700">· LIVE BET</span>') + '</div><div class="mkt">' + esc(t.event) + '</div></div>' +
-      '<div class="vs">' + sub + 'in ' + dollars(trTotal(t)) + '<br/>' + (open ? "payout " + dollars(Math.min(t.a_payout, t.b_payout)) + " either way" : "returned " + dollars(t.returned)) + '</div></div>' + (open ? liveBox(t) : "") +
+      '<div class="vs">' + sub + 'in ' + dollars(trTotal(t)) + '<br/>' + (open ? "payout " + dollars(Math.min(t.a_payout, t.b_payout)) + " either way" : "returned " + dollars(t.returned)) + '</div></div>' + 
       '<div class="legs">' + trLeg("a", t) + trLeg("b", t) + '</div>';
     if (t.note) h += '<div class="trnote">' + esc(t.note) + '</div>';
     h += '<div class="trbtns">';
@@ -1467,7 +1414,6 @@
     $("trRoi").textContent = used ? (100 * realized / used).toFixed(2) + "%" : "-";
     $("trIn").textContent = dollars(inOpen);
     $("trList").innerHTML = tracks.length ? tracks.map(trCard).join("") : '<div class="empty">No arbs tracked yet.<br/>Tap "Add an arb" below after you place one.</div>';
-    paintLive();
   }
   async function loadTracker() {
     try {
@@ -1512,7 +1458,7 @@
       await loadTracker();
     } catch (err) { $("trMsg").textContent = (err && err.message) ? err.message : "Couldn't save."; }
   });
-  loadTracker().then(loadLive); loadPnl(); setInterval(loadTracker, 60000); setInterval(loadLive, 6000); setInterval(loadPnl, 60000);
+  loadTracker(); loadPnl(); setInterval(loadTracker, 60000); setInterval(loadPnl, 60000);
 
   // ---------- manual arbitrage calculator (runs in the browser only) ----------
   // Polymarket: buying 1 share at price p costs p (+ taker fee 0.0695*p*(1-p)) and pays $1 if it wins.
