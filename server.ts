@@ -333,6 +333,37 @@ function walkBuy(levels: { p: number; q: number }[], maxRaw: number, cash: numbe
   }
   return { shares, spent, left };
 }
+// ---- FRESH LIVE BOVADA PRICE (start) ----
+// Bovada's public price list is at least ~50 s old for live games, so a live Bovada arb found from it is usually a phantom (the real line has moved).
+// Before such an arb is listed, alerted or auto-bought, ask the VPS for Bovada's exact price right now and recompute the edge on that.
+const FRESH_URL = (Bun.env.BETTOR_URL ?? "").replace(/\/+$/, "");
+const FRESH_KEY = Bun.env.BETTOR_KEY ?? "";
+const freshCache = new Map<string, { at: number; v: number | null | undefined }>();
+const LIVE_BVD_MIN_PCT = Number(Bun.env.ARB_LIVE_BVD_MIN_PCT ?? 1.0);   // a live Bovada arb must still be at least this good on the fresh price to be listed
+// number = the exact decimal price now; null = Bovada says that line isn't open; undefined = couldn't ask (VPS down, or the Bovada login is dead)
+async function bvdFreshOdds(outcomeId: string): Promise<number | null | undefined> {
+  const hit = freshCache.get(outcomeId);
+  if (hit && Date.now() - hit.at < 4000) return hit.v;
+  let v: number | null | undefined = undefined;
+  try {
+    if (FRESH_URL && FRESH_KEY) {
+      const r = await fetch(`${FRESH_URL}/bvd-price?outcomeId=${encodeURIComponent(outcomeId)}`, { headers: { "x-bettor-key": FRESH_KEY }, signal: AbortSignal.timeout(6000) });
+      const j: any = await r.json().catch(() => ({}));
+      if (r.ok && !j?.error) v = j.http === 200 && j.status === "AVAILABLE" && Number(j.price) > 1 ? Number(j.price) : null;
+    }
+  } catch {}
+  freshCache.set(outcomeId, { at: Date.now(), v });
+  if (freshCache.size > 300) for (const [k, x] of freshCache) if (Date.now() - x.at > 60000) freshCache.delete(k);
+  return v;
+}
+const staleNoted = new Map<string, number>();
+function staleNote(label: string, text: string) {
+  if (Date.now() - (staleNoted.get(label) ?? 0) < 120000) return;
+  staleNoted.set(label, Date.now());
+  console.log(`LIVE-BVD ${label}: ${text}`);
+}
+// ---- FRESH LIVE BOVADA PRICE (end) ----
+
 // ---- DEPTH-AWARE SIZING (start) ----
 // The scanner lists an arb whenever SOME safe size fits Polymarket's order book (>= ARB_LIST_MIN_TOTAL dollars across both legs); it no longer hides an
 // arb just because the full bankroll doesn't fit. The buy then sizes to the same book: it shrinks the Polymarket cash to what the book can fill at an
@@ -1979,14 +2010,25 @@ async function scan(): Promise<number> {
           const tieRisk = /cricket/i.test(j.ge.sport.name) || /^tennis$/i.test(j.ge.sport.name) || (/baseball/i.test(j.ge.sport.name) && !/mlb/i.test(String(j.ge.league)));
           const pmUrl = pmEventUrl(j.ev?.slug), gtUrl = j.ge?.url ?? null;
           for (const leg of legs) {
-            const dPm = pmDecimal(leg.p), dGt = gOdds[leg.other];
+            const dPm = pmDecimal(leg.p); let dGt = gOdds[leg.other];
             if (!dGt) continue;
             if (tieRisk && 1 / dPm >= CRICKET_MAX_PM_COST) continue;
-            const pct = (1 / (1 / dPm + 1 / dGt) - 1) * 100;
+            let pct = (1 / (1 / dPm + 1 / dGt) - 1) * 100;
             const label = `${j.L.description} vs ${j.S.description} (${j.ge.sport.name})`;
             noteClose(pct, label);
             if (WATCH && WATCH.test(label)) console.log(`WATCH ${label} [${bk}]: Polymarket ${leg.side === "a" ? "best ask" : "other side (1 - best bid)"} ${(leg.p * 100).toFixed(1)}c = ${dPm.toFixed(3)} after fee | ${bk} ${dGt.toFixed(3)} | edge ${pct.toFixed(2)}% | Polymarket liquidity $${Math.round(leg.liq)} | bid ${bid} ask ${ask}`);
             if (pct <= 0) continue;
+            // a LIVE Bovada arb comes from a price list that is ~50 s old: confirm it on Bovada's exact current price before anything else happens to it
+            if (bk === "bovada" && j.live && pct >= LIVE_BVD_MIN_PCT) {
+              const bcl = j.ge.comps.find((c: any) => c.id === leg.other);
+              const oidl = bcl && j.feed?.mlIds?.[bcl.name];
+              const fresh = oidl ? await bvdFreshOdds(String(oidl)) : undefined;
+              if (fresh === undefined) { staleNote(label, `${pct.toFixed(1)}% on the scan, but Bovada's exact price couldn't be read (VPS down or Bovada login dead), so it isn't listed`); continue; }
+              if (fresh === null) { staleNote(label, `${pct.toFixed(1)}% on the scan, but Bovada has that line closed right now, so it isn't listed`); continue; }
+              dGt = fresh;
+              pct = (1 / (1 / dPm + 1 / dGt) - 1) * 100;
+              if (pct < LIVE_BVD_MIN_PCT) { staleNote(label, `scan said ${((1 / (1 / dPm + 1 / (gOdds[leg.other] as number)) - 1) * 100).toFixed(1)}% but Bovada's price right now (${fresh.toFixed(2)}) gives ${pct.toFixed(1)}%: a stale-price phantom, not listed`); continue; }
+            }
             // this cap used to only fire `if (j.feed)` -- i.e. only for cross-book feed matches
             // (Bovada/Bet105/Gemini), leaving the direct Polymarket-vs-Goated id/name-matched path
             // completely uncapped. Confirmed via the DB: every "Czech Liga Pro" table tennis arb
