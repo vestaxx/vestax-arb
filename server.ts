@@ -993,8 +993,22 @@ function bvdCollect(ev: any, live: boolean, teams: string[], alt: boolean, out: 
   }
   out.totals = Object.values(tot);
 }
+// Every Bovada game we have seen (live ones included, even when their price list is too stale to trade on), kept ONLY so the live score box can find a game's scoreboard.
+// The arb feed above drops live games whose prices are over BVD_LIVE_MAX_AGE old, and those used to have no score either.
+const bvdScoreIdx = new Map<string, { at: number; ev: FeedEv }>();
+function bvdIndexEvent(ev: any) {
+  if (ev?.id == null) return;
+  let teams: string[] = (ev?.competitors ?? []).map((c: any) => String(c?.name ?? "").trim()).filter(Boolean);
+  if (teams.length !== 2) { const p = String(ev?.description ?? "").split(/\s+(?:@|vs\.?|v)\s+/i); teams = p.length === 2 ? [p[0].trim(), p[1].trim()] : []; }
+  if (teams.length !== 2 || teams[0] === teams[1]) return;
+  const homeC = (ev?.competitors ?? []).find((c: any) => c?.home === true);
+  const st = Number(ev.startTime);
+  bvdScoreIdx.set(String(ev.id), { at: Date.now(), ev: { teams: [teams[0], teams[1]], spreads: [], totals: [], ml: {}, live: !!ev.live, bid: String(ev.id), home: homeC?.name ? String(homeC.name).trim() : undefined, start: Number.isFinite(st) && st > 1e11 ? st : undefined } as FeedEv });
+  if (bvdScoreIdx.size > 6000) for (const [k, x] of bvdScoreIdx) if (Date.now() - x.at > 12 * 3600e3) bvdScoreIdx.delete(k);
+}
 function bvdParse(ev: any, league: string): FeedEv | null {
   if (ev?.type && ev.type !== "GAMEEVENT") return null;
+  bvdIndexEvent(ev);
   const live = !!ev?.live;
   // BVD_LIVE was turned on, but every live candidate is STILL being rejected (confirmed via
   // FEED-NOMATCH-ZERO: liveMiss = pool size, every single time, even after the toggle and a fresh
@@ -2326,7 +2340,8 @@ function teamHit(team: string, text: string) {
 }
 function findBvd(event: string, startMs: number | null): { id: string; ev: FeedEv } | null {
   let best: { id: string; ev: FeedEv } | null = null, bestScore = -1;
-  for (const [, v] of feeds.bovada) {
+  for (const [, v] of bvdScoreIdx) {
+    if (Date.now() - v.at > 12 * 3600e3) continue;
     const e = v.ev;
     if (!e.bid || !(teamHit(e.teams[0], event) && teamHit(e.teams[1], event))) continue;
     let sc = e.live ? 2 : 0;
@@ -2334,6 +2349,12 @@ function findBvd(event: string, startMs: number | null): { id: string; ev: FeedE
     if (sc > bestScore) { best = { id: e.bid, ev: e }; bestScore = sc; }
   }
   return best;
+}
+const liveNoted = new Map<string, number>();
+function liveNote(key: string, text: string, everyMs = 600000) {
+  if (Date.now() - (liveNoted.get(key) ?? 0) < everyMs) return;
+  liveNoted.set(key, Date.now());
+  console.log(`LIVE-SCORE ${text}`);
 }
 async function bvdBoard(bid: string): Promise<any | null> {
   const hit = liveCache.get(bid);
@@ -2343,7 +2364,8 @@ async function bvdBoard(bid: string): Promise<any | null> {
     try {
       const r = await fetch(`${BVD_HOST}/services/sports/results/api/v1/scores/${encodeURIComponent(bid)}`, { headers: { "user-agent": LIVE_UA, accept, referer: BVD_HOST + "/" }, signal: AbortSignal.timeout(6000) });
       if (r.status === 200) { v = await r.json().catch(() => null); if (v) break; }
-    } catch {}
+      else liveNote("http" + r.status, `Bovada's scoreboard answered HTTP ${r.status} (game ${bid}, ${accept.includes("full") ? "full" : "summary"} format)`);
+    } catch (e: any) { liveNote("err", `scoreboard request failed: ${String(e?.message ?? e).slice(0, 100)}`); }
   }
   liveCache.set(bid, { at: Date.now(), v });
   if (liveCache.size > 300) for (const [k, x] of liveCache) if (Date.now() - x.at > 60000) liveCache.delete(k);
@@ -2378,12 +2400,22 @@ async function liveScores() {
   const rows: any[] = await sql`SELECT id, event, event_start FROM arb_tracker WHERE status = 'open' ORDER BY placed_at`;
   const out = await Promise.all(rows.map(async (t: any) => {
     const hit = findBvd(String(t.event), t.event_start ? new Date(t.event_start).getTime() : null);
-    if (!hit) return { id: t.id, found: false };
+    if (!hit) { liveNote("nomatch:" + t.event, `no Bovada game found for "${t.event}" (open bet)`); return { id: t.id, found: false }; }
     const j = await bvdBoard(hit.id);
-    if (!j) return { id: t.id, found: false };
+    if (!j) { liveNote("noboard:" + hit.id, `found Bovada game ${hit.id} for "${t.event}" but its scoreboard wouldn't load`); return { id: t.id, found: false }; }
     return { id: t.id, ...liveShape(j, hit.ev) };
   }));
-  return { rows: out };
+  // the live arbs on the scanner's Live tab get the same score line (best ones first, capped so a busy night can't flood Bovada with requests)
+  const live: any[] = await sql`SELECT id, player_a, player_b, start_time FROM arb_opps WHERE active AND is_live AND profit_pct >= 1 ORDER BY profit_pct DESC LIMIT 12`;
+  const arbs: Record<string, any> = {};
+  await Promise.all(live.map(async (r: any) => {
+    const name = `${r.player_a} vs ${r.player_b}`;
+    const hit = findBvd(name, r.start_time ? new Date(r.start_time).getTime() : null);
+    if (!hit) { liveNote("nomatch:" + name, `no Bovada game found for "${name}" (live arb card)`); arbs[r.id] = { found: false }; return; }
+    const j = await bvdBoard(hit.id);
+    arbs[r.id] = j ? liveShape(j, hit.ev) : { found: false };
+  }));
+  return { rows: out, arbs };
 }
 // ---- LIVE SCORES (end) ----
 

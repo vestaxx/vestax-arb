@@ -814,6 +814,7 @@
         '<div class="when">' + (r.is_live ? '<span class="tag live">LIVE</span><span class="age">' + ageText(r.first_seen) + '</span>' + (r.start_time ? '<span class="age">started ' + when(r.start_time) + '</span>' : '') : when(r.start_time)) + (fresh ? '<span class="tag new">NEW</span>' : '') + '</div>' +
         '<div><div class="sport">' + ICON(r.sport) + ' ' + esc(r.sport) + (r.league ? ' · ' + esc(r.league) : '') + '</div><div class="mkt">' + esc(r.market) + '</div></div>' +
         '<div class="vs">' + esc(r.player_a) + ' vs<br/>' + esc(r.player_b) + '</div></div>' +
+        (r.is_live ? liveArbBox(r) : "") +
         (editingId === r.id
           ? '<div class="legs">' + legEditPair(r, sa, sb) + '</div>'
           : '<div class="legs">' + leg(r.player_a, r.book_a, r.odds_a, r.liq_a, sa, gj(r, "a", sa, sb), pmPairId, r.url_a) + leg(r.player_b, r.book_b, r.odds_b, r.liq_b, sb, gj(r, "b", sb, sa), pmPairId, r.url_b) + '</div>') +
@@ -1389,7 +1390,7 @@
   $("pnlGrid").addEventListener("click", (e) => { const c = e.target.closest("[data-day]"); if (!c) return; const k = c.getAttribute("data-day"); pnlSel = pnlSel === k ? "" : k; renderPnl(); });
 
   // ---------- live score box (open arbs): teams, score, quarter / inning / set and clock, read from Bovada's scoreboard ----------
-  let liveMap = {};
+  let liveMap = {}, liveArbMap = {};
   function liveInner(l) {
     if (!l) return "Checking the live score…";
     if (!l.found) return "No live score feed for this game right now.";
@@ -1399,6 +1400,10 @@
     return '<div class="teams"><div class="tm' + lead(a, h) + '"><span>' + esc(l.away.name) + '</span><span class="sc">' + (hasScore ? esc(a) : "") + '</span></div>' +
       '<div class="tm' + lead(h, a) + '"><span>' + esc(l.home.name) + '</span><span class="sc">' + (hasScore ? esc(h) : "") + '</span></div></div>' +
       '<div class="st">' + chip + (l.detail ? '<span class="big">' + esc(l.detail) + '</span>' : "") + (l.extra ? '<span>' + esc(l.extra) + '</span>' : "") + (l.sets ? '<span>score shown is sets</span>' : "") + '</div>';
+  }
+  function liveArbBox(r) {
+    const l = liveArbMap[r.id];
+    return '<div class="livebox' + (l && l.found ? "" : " off") + '" data-livearb="' + r.id + '">' + liveInner(l) + '</div>';
   }
   function liveBox(t) {
     const l = liveMap[t.id];
@@ -1410,12 +1415,17 @@
       el.className = "livebox" + (l && l.found ? "" : " off");
       el.innerHTML = liveInner(l);
     });
+    document.querySelectorAll("[data-livearb]").forEach((el) => {
+      const l = liveArbMap[el.getAttribute("data-livearb")];
+      el.className = "livebox" + (l && l.found ? "" : " off");
+      el.innerHTML = liveInner(l);
+    });
   }
   async function loadLive() {
-    if (document.hidden || !tracks.some((t) => t.status === "open")) return;
+    if (document.hidden || (!tracks.some((t) => t.status === "open") && !rows.some((r) => r.is_live))) return;
     try {
       const d = await (await fetch("/api/live", { cache: "no-store" })).json();
-      const m = {}; (d.rows || []).forEach((r) => { m[r.id] = r; }); liveMap = m; paintLive();
+      const m = {}; (d.rows || []).forEach((r) => { m[r.id] = r; }); liveMap = m; liveArbMap = d.arbs || {}; paintLive();
     } catch (e) { /* keep the last scores on screen */ }
   }
   function trCard(t) {
