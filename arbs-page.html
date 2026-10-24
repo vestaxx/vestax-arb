@@ -1344,14 +1344,28 @@
       '<div class="ret">pays ' + dollars(payout) + '</div>' + (t.status === "open" ? '<div class="ret" style="font-weight:700;color:var(--' + (payout - trTotal(t) >= 0 ? "win" : "loss") + ')">if wins ' + money(payout - trTotal(t)) + '</div>' : '') + '</div>' +
       '<span class="odds"><span class="logo lg-' + esc(book) + '">' + abbr + '</span>' + amer(odds) + '</span></div></div>';
   }
-  // ---------- arb P&L: realized profit per day (counted on the day each arb settled), month calendar + totals ----------
+  // ---------- arb P&L: realized profit per day (counted on the day each game started), month calendar + totals ----------
   let pnl = { rows: [], open: { n: 0, staked: 0, locked: 0 }, today: "" }, pnlMonth = "", pnlSel = "";
   const mny = (x) => (x < 0 ? "-$" : "+$") + Math.abs(x).toFixed(2);
   // compact amount for the small calendar cells: whole dollars from $10 up, one decimal under $10, "k" from $1,000
   const cmny = (x) => { const a = Math.abs(x); return (x < 0 ? "-$" : "+$") + (a >= 1000 ? (a / 1000).toFixed(1) + "k" : a >= 10 ? a.toFixed(0) : a.toFixed(1)); };
   const pcol = (x) => x > 0 ? "var(--win)" : x < 0 ? "var(--loss)" : "var(--fg)";
+  // the calendar counts each arb on the day its GAME STARTED (Pacific time); live bets with no start time count on the day they were placed
+  const ptDay = (v) => new Date(v).toLocaleDateString("en-CA", { timeZone: "America/Los_Angeles" });
+  const PNL_BOOK = { polymarket: "Polymarket", goated: "Goated", bet105: "Bet105", bovada: "Bovada", gemini: "Gemini", novig: "Novig", dexsport: "Dexsport", other: "Other" };
+  function pnlRows() {
+    const server = pnl.rows || [];
+    if (!tracks.length) return server; // tracker list not loaded yet: show what the server sent
+    const mine = tracks.filter((t) => t.status !== "open" && (t.event_start || t.placed_at)).map((t) => {
+      const staked = Number(t.a_stake) + Number(t.b_stake);
+      return { day: ptDay(t.event_start || t.placed_at), profit: Number(t.returned || 0) - staked, staked, event: t.event, books: [PNL_BOOK[t.a_book] || t.a_book, PNL_BOOK[t.b_book] || t.b_book], status: t.status };
+    });
+    if (tracks.length < 190) return mine; // the tracker list holds up to 200 entries; under that it is complete
+    const cut = ptDay(tracks.reduce((m, t) => (t.placed_at < m ? t.placed_at : m), tracks[0].placed_at));
+    return server.filter((r) => r.day < cut).concat(mine.filter((r) => r.day >= cut)); // older history still comes from the server
+  }
   function renderPnl() {
-    const rows = pnl.rows || [], curMonth = (pnl.today || new Date().toISOString().slice(0, 10)).slice(0, 7);
+    const rows = pnlRows(), curMonth = (pnl.today || new Date().toISOString().slice(0, 10)).slice(0, 7);
     if (!pnlMonth) pnlMonth = curMonth;
     const minMonth = rows.length ? rows.reduce((m, r) => (r.day.slice(0, 7) < m ? r.day.slice(0, 7) : m), curMonth) : curMonth;
     const byDay = {};
@@ -1380,7 +1394,7 @@
     }
     $("pnlGrid").innerHTML = cells;
     const o = pnl.open || {};
-    $("pnlFoot").innerHTML = "Profit counts on the day each arb settled. Right now: " + (o.n || 0) + " open, $" + Number(o.staked || 0).toFixed(2) + " in play, " + mny(Number(o.locked || 0)) + " locked in if they all settle clean.";
+    $("pnlFoot").innerHTML = "Profit counts on the day each game started (live bets count on the day they were placed). Right now: " + (o.n || 0) + " open, $" + Number(o.staked || 0).toFixed(2) + " in play, " + mny(Number(o.locked || 0)) + " locked in if they all settle clean.";
     const sel = byDay[pnlSel];
     $("pnlDetail").innerHTML = sel ? '<div class="pnl-day"><h4>' + esc(pnlSel) + ' · ' + mny(sel.profit) + ' on ' + sel.n + ' arb' + (sel.n > 1 ? "s" : "") + '</h4>' +
       sel.items.map((r) => '<div class="pnl-row"><span>' + esc(r.event) + '<small>' + esc((r.books || []).join(" + ")) + ' · $' + Number(r.staked).toFixed(2) + ' used' + (r.status === "other" ? ' · not a clean win' : '') + '</small></span><b style="color:' + pcol(r.profit) + '">' + mny(r.profit) + '</b></div>').join("") + '</div>' : "";
@@ -1439,7 +1453,7 @@
   async function loadTracker() {
     try {
       const d = await (await fetch("/api/tracker", { cache:"no-store" })).json();
-      tracks = d.rows || []; renderTracker();
+      tracks = d.rows || []; renderTracker(); renderPnl();
     } catch (e) { /* keep last view */ }
   }
   $("trList").addEventListener("click", async (e) => {
