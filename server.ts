@@ -2234,18 +2234,36 @@ function unsettled(t: any, why: string) {
   if (now - startMs > 4 * 3600e3) void ntfy(`Settle by hand: ${t.event}`, `I can't settle this one by myself: ${why}. Settle the card yourself once both books have paid out.`, "default");
 }
 // find the Polymarket market (and which side you hold) for a game by its two team names, from the games the scanner currently has listed
+// The scanner keeps two kinds of Polymarket games: per-team ones ({ L: { description }, S: { description } }) and name-matched ones (tennis, table tennis, esports:
+// { Ld, Sd }). The finder used to read only the first kind, so it never saw most tennis games. This returns the two side names whichever kind it is.
+const pmSideNames = (g: any): [string, string] | null => {
+  const L = g?.L?.description ?? g?.Ld, S = g?.S?.description ?? g?.Sd;
+  return L && S ? [String(L), String(S)] : null;
+};
 function findPmMarket(event: string, pmPick: string): { slug: string; long: boolean } | null {
   const hit = (team: string) => { const t = nameToks(team); if (!t.length) return false; const hay = new Set(nameToks(event)); return t.every((w) => hay.has(w)); };
-  const found: any[] = [];
+  const found: { slug: string; L: string; S: string }[] = [];
   for (const arr of [pmGames, pmNameGames]) for (const g of arr ?? []) {
-    const L = g?.L?.description, S = g?.S?.description, slug = g?.wm?.slug;
-    if (L && S && slug && hit(String(L)) && hit(String(S))) found.push(g);
+    const n = pmSideNames(g), slug = g?.wm?.slug;
+    if (n && slug && hit(n[0]) && hit(n[1])) found.push({ slug: String(slug), L: n[0], S: n[1] });
   }
-  if (!found.length || new Set(found.map((g) => g.wm.slug)).size !== 1) return null;
+  if (!found.length || new Set(found.map((g) => g.slug)).size !== 1) return null;
   const g = found[0];
-  const pk = pmPick.trim().toLowerCase(), na = String(g.L.description).trim().toLowerCase(), nb = String(g.S.description).trim().toLowerCase();
+  const pk = pmPick.trim().toLowerCase(), na = g.L.trim().toLowerCase(), nb = g.S.trim().toLowerCase();
   const long = pk === na ? true : pk === nb ? false : (pk.includes(na) || na.includes(pk)) && !(pk.includes(nb) || nb.includes(pk)) ? true : (pk.includes(nb) || nb.includes(pk)) && !(pk.includes(na) || na.includes(pk)) ? false : null;
-  return long === null ? null : { slug: String(g.wm.slug), long };
+  return long === null ? null : { slug: g.slug, long };
+}
+// the Polymarket games whose names look most like a card (for the log when nothing matches)
+function nearestPm(event: string): string {
+  const hay = new Set(nameToks(event));
+  const scored: { n: number; txt: string }[] = [];
+  for (const arr of [pmGames, pmNameGames]) for (const g of arr ?? []) {
+    const n = pmSideNames(g); if (!n) continue;
+    const c = [...nameToks(n[0]), ...nameToks(n[1])].filter((w) => hay.has(w)).length;
+    if (c > 0) scored.push({ n: c, txt: `${n[0]} vs ${n[1]} (${g?.wm?.slug})` });
+  }
+  scored.sort((x, y) => y.n - x.n);
+  return scored.length ? "closest Polymarket games: " + scored.slice(0, 3).map((x) => x.txt).join("; ") : "no Polymarket game has any of these names (the scanner lists " + ((pmGames?.length ?? 0) + (pmNameGames?.length ?? 0)) + " games)";
 }
 let settleRunning = false;
 async function pmSettlementValue(slug: string): Promise<number | null> {
@@ -2293,7 +2311,15 @@ async function settleOpenArbs() {
         pmLong = pk === na ? true : pk === nb ? false : (pk.includes(na) || na.includes(pk)) && !(pk.includes(nb) || nb.includes(pk)) ? true : (pk.includes(nb) || nb.includes(pk)) && !(pk.includes(na) || na.includes(pk)) ? false : null;
         }
       }
-      if (!slug || pmLong === null) { unsettled(t, "I can't find this game's Polymarket market (it was never listed on the scanner and wasn't recognised when you added it)"); continue; }
+      if ((!slug || pmLong === null) && (pmIsA || pmIsB)) {   // no market saved with the card: look again among the games the scanner has listed right now, and save it if found
+        const found = findPmMarket(String(t.event), String(pmIsA ? t.a_pick : t.b_pick));
+        if (found) {
+          slug = found.slug; pmLong = found.long;
+          try { await sql`UPDATE arb_tracker SET pm_slug = ${found.slug}, pm_long = ${found.long} WHERE id = ${t.id}`; } catch {}
+          console.log(`ARB-SETTLE #${t.id} ${t.event}: found its Polymarket market now (${found.slug}) and saved it`);
+        }
+      }
+      if (!slug || pmLong === null) { unsettled(t, "I can't find this game's Polymarket market (it was never listed on the scanner and wasn't recognised when you added it) | " + nearestPm(String(t.event))); continue; }
       const v = await pmSettlementValue(slug);
       if (v === null) { void waiting(t, slug); continue; } // not resolved yet
       const total = Number(t.a_stake) + Number(t.b_stake);
