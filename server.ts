@@ -339,7 +339,7 @@ function walkBuy(levels: { p: number; q: number }[], maxRaw: number, cash: numbe
 const FRESH_URL = (Bun.env.BETTOR_URL ?? "").replace(/\/+$/, "");
 const FRESH_KEY = Bun.env.BETTOR_KEY ?? "";
 const freshCache = new Map<string, { at: number; v: number | null | undefined }>();
-const LIVE_BVD_MIN_PCT = Number(Bun.env.ARB_LIVE_BVD_MIN_PCT ?? 1.0);   // a live Bovada arb must still be at least this good on the fresh price to be listed
+const LIVE_BVD_MIN_PCT = Number(Bun.env.ARB_LIVE_BVD_MIN_PCT ?? 0.3);   // a live Bovada arb must still be at least this good on the fresh price to be LISTED (auto-fire has its own, higher floor of 1%)
 // number = the exact decimal price now; null = Bovada says that line isn't open; undefined = couldn't ask (VPS down, or the Bovada login is dead)
 async function bvdFreshOdds(outcomeId: string): Promise<number | null | undefined> {
   const hit = freshCache.get(outcomeId);
@@ -434,6 +434,9 @@ function dropNote(label: string, pct: number, dp: { depth?: number; size?: numbe
 }
 // ---- DEPTH-AWARE SIZING (end) ----
 const alerted = new Map<string, number>();
+// Bovada shows American odds, so phone alerts give Bovada's price in American (+150 / -147). Every other book stays in decimal.
+const americanOdds = (dec: number) => !(dec > 1) ? String(dec) : dec >= 2 ? "+" + Math.round((dec - 1) * 100) : String(Math.round(-100 / (dec - 1)));
+const oddsText = (book: string, dec: number) => (String(book).toLowerCase() === "bovada" ? americanOdds(dec) : dec.toFixed(2));
 async function ntfy(title: string, body: string, priority = "high", click?: string | null, actions?: string): Promise<boolean> {
   if (!NTFY_TOPIC) return false;
   try {
@@ -458,7 +461,7 @@ function alertArb(a: { key: string; pct: number; sport: string; league: string; 
   const locked = Math.min(sg * a.gtOdds, sp * dPm) - sg - sp;
   const body = [
     `${a.sport} · ${a.league} · ${when}`,
-    `1) ${lab}: ${a.gtName} @ ${a.gtOdds.toFixed(2)} -> bet $${fmt(sg)}`,
+    `1) ${lab}: ${a.gtName} @ ${oddsText(lab, a.gtOdds)} -> bet $${fmt(sg)}`,
     `2) Polymarket: ${a.pmName} @ ${a.pmCents}c -> bet $${fmt(sp)}` + (a.pmLiq ? ` (depth ~$${Math.round(a.pmLiq)})` : ""),
     `Locks about +$${locked.toFixed(2)} (${((100 * locked) / (sg + sp)).toFixed(2)}%) on $${fmt(sg + sp)}.`,
     a.live ? "LIVE: prices move fast and big live gaps are often stale - check both sides." : "Confirm both prices before betting.",
@@ -561,8 +564,8 @@ function alertCross(key: string, pct: number, sport: string, matchup: string, li
   const locked = Math.min(sa * legA.odds, sb * legB.odds) - sa - sb;
   const body = [
     `${sport} · ${matchup} · ${when}`,
-    `1) ${FEED_LABEL[legA.book] ?? legA.book}: ${legA.name} @ ${legA.odds.toFixed(2)} -> bet $${sa}`,
-    `2) ${FEED_LABEL[legB.book] ?? legB.book}: ${legB.name} @ ${legB.odds.toFixed(2)} -> bet $${sb}`,
+    `1) ${FEED_LABEL[legA.book] ?? legA.book}: ${legA.name} @ ${oddsText(legA.book, legA.odds)} -> bet $${sa}`,
+    `2) ${FEED_LABEL[legB.book] ?? legB.book}: ${legB.name} @ ${oddsText(legB.book, legB.odds)} -> bet $${sb}`,
     `Locks about +$${locked.toFixed(2)} (${((100 * locked) / (sa + sb)).toFixed(2)}%) on $${sa + sb}. No Polymarket leg -- place both bets by hand and confirm both prices first.`,
   ].join("\n");
   const acts: string[] = [];
@@ -579,12 +582,13 @@ const pairKey = (a: string, b: string) => [a, b].sort().join("-");
 // dropped that tournament's events for the whole cycle, which is why the catalogue was flickering
 // between a tiny, inconsistent subset of sports refresh to refresh instead of holding steady.
 // Retrying a 429 after a short wait, honoring Retry-After if Goated sends one, is the direct fix.
-async function gt(path: string, attempt = 0): Promise<any> {
+// tries = how many 429 retries; the wait is capped at 3 s so one throttled call can no longer hold a whole scan for half a minute.
+async function gt(path: string, attempt = 0, tries = 3): Promise<any> {
   const r = await fetch(GT + path, { headers: { "user-agent": UA, accept: "application/json" } });
-  if (r.status === 429 && attempt < 3) {
+  if (r.status === 429 && attempt < tries) {
     const ra = Number(r.headers.get("retry-after"));
-    await Bun.sleep(Number.isFinite(ra) && ra > 0 ? ra * 1000 : 800 * (attempt + 1));
-    return gt(path, attempt + 1);
+    await Bun.sleep(Math.min(3000, Number.isFinite(ra) && ra > 0 ? ra * 1000 : 800 * (attempt + 1)));
+    return gt(path, attempt + 1, tries);
   }
   if (!r.ok) throw new Error(`goated ${r.status} ${path}`);
   return (await r.json())?.data;
@@ -802,11 +806,24 @@ function gtHandicapFrom(mk: any[]): GtHand {
   return out;
 }
 async function gtMarkets(ev: any): Promise<{ winner: Record<string, number> | null; totals: GtTot; hand: GtHand }> {
-  const mk = (await gt(`/event/${ev.slug}/formatted-markets?lang=en&category=all`)) ?? [];
+  const mk = (await gt(`/event/${ev.slug}/formatted-markets?lang=en&category=all`, 0, 1)) ?? [];
   const team = TEAM_SPORTS.test(ev.sport.name);
   return { winner: gtWinnerFrom(mk, ev), totals: team ? gtTotalsFrom(mk) : (new Map() as GtTot), hand: team ? gtHandicapFrom(mk) : [] };
 }
 
+// Goated's per-game markets, cached ACROSS scans (it used to be refetched for every game in every scan, which got us rate-limited with 429s and made scans
+// run past the page's 45-second "stale" line). Live games stay fresh for 6 s, pre-match games for 45 s, and a failed fetch is remembered for 20 s instead of
+// being retried by every job in every scan. The buy itself always re-reads the real Goated price.
+const GM_TTL_LIVE_MS = Number(Bun.env.ARB_GM_TTL_LIVE_MS ?? 6000), GM_TTL_PRE_MS = Number(Bun.env.ARB_GM_TTL_PRE_MS ?? 45000);
+const gmStore = new Map<string, { at: number; ttl: number; p: Promise<{ winner: Record<string, number> | null; totals: GtTot; hand: GtHand }> }>();
+const gmCached = (ge: any) => {
+  const now = Date.now(), e = gmStore.get(ge.slug);
+  if (e && now - e.at < e.ttl) return e.p;
+  const ent = { at: now, ttl: ge?.status === "live" ? GM_TTL_LIVE_MS : GM_TTL_PRE_MS, p: gtMarkets(ge) };
+  gmStore.set(ge.slug, ent);
+  ent.p.catch(() => { ent.at = Date.now(); ent.ttl = 20000; });
+  return ent.p;
+};
 type FeedEv = { teams: [string, string]; spreads: { team: string; line: number; odds: number }[]; totals: { line: number; over?: number; under?: number }[]; ml: Record<string, number>; live: boolean; start?: number; url?: string; link?: string; league?: string; sport?: string; mapMl?: Record<number, Record<string, number>>; mlIds?: Record<string, string>; bid?: string; home?: string };
 const feeds: Record<string, Map<string, { at: number; ev: FeedEv }>> = { bet105: new Map(), bovada: new Map(), gemini: new Map() };
 const FEED_BOOKS = ["bet105", "bovada", "gemini"];
@@ -1612,8 +1629,7 @@ async function scan(): Promise<number> {
   const feedEvs: Record<string, FeedEv[]> = { bet105: feedLive("bet105"), bovada: feedLive("bovada"), gemini: feedLive("gemini") };
   const feedN: Record<string, number> = { bet105: 0, bovada: 0, gemini: 0 };
   let blockedN = 0, crossN = 0;
-  const gmCache = new Map<string, Promise<{ winner: Record<string, number> | null; totals: GtTot; hand: GtHand }>>();
-  const gmCached = (ge: any) => { let p = gmCache.get(ge.slug); if (!p) { p = gtMarkets(ge); gmCache.set(ge.slug, p); } return p; };
+  for (const [k, e] of gmStore) if (Date.now() - e.at > 600000) gmStore.delete(k);
   const closeList: { pct: number; label: string }[] = [];
   const noteClose = (pct: number, label: string) => { closeList.push({ pct, label }); };
   const queue = (job: any, isLive: boolean) => {
@@ -1657,7 +1673,7 @@ async function scan(): Promise<number> {
     if (kind && !isBlocked(g.ev.slug, g.wm.slug, ge?.league, g.t) && (lP || (sP > Date.now() - 600000 && sP - Date.now() < PRE_WINDOW_MS))) {
       const fb = await addFeedJobs(g, sP, lP);
       const cross: CrossEntry[] = [];
-      if (ge) {
+      if (ge && FEED_BOOKS.some((bk) => (fb as any)[bk])) {
         try {
           const gm = await gmCached(ge);
           const oA = gm.winner?.[g.lid], oB = gm.winner?.[g.sid];
@@ -2099,7 +2115,7 @@ async function scan(): Promise<number> {
   while (true) {
     const t = Date.now();
     let liveCount = 0;
-    try { liveCount = await scan(); } catch (e: any) {
+    try { liveCount = await scan(); const took = Date.now() - t; if (took > 30000) console.log(`SLOW scan: ${(took / 1000).toFixed(0)}s (the page calls the scanner stale after 45s)`); } catch (e: any) {
       console.error("scan failed:", e?.message ?? e);
       try { await sql`UPDATE arb_status SET note = ${String(e?.message ?? e).slice(0, 200)} WHERE id = 1`; } catch {}
     }
