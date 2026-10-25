@@ -16,7 +16,7 @@ type Deps = {
 
 const BETTOR_URL = (Bun.env.BETTOR_URL ?? "").replace(/\/+$/, "");
 const BETTOR_KEY = Bun.env.BETTOR_KEY ?? "";
-const MAX_USD = Number(Bun.env.ARB_BUY_MAX_USD ?? 25); // most that can be spent across both legs in one click
+const MAX_USD = Number(Bun.env.ARB_BUY_MAX_USD ?? 1000); // most that can be spent across both legs in ONE CLICK of yours (auto-fire has its own, much lower size)
 const DEFAULT_BANK = Number(Bun.env.ARB_BUY_BANKROLL ?? 10);
 // Auto-fire needs a bigger edge than a manual tap on the FRESH prices (the buy re-reads both prices right before any money moves).
 // Thin edges are what flipped to a small loss before; live Bovada candidates come from a ~50 s old price list, so this is the real gate.
@@ -44,6 +44,16 @@ const ptHour = () => Number(new Intl.DateTimeFormat("en-US", { timeZone: "Americ
 const AUTO_MAX_PER_DAY = Number(Bun.env.ARB_AUTO_MAX_PER_DAY ?? 10); // most auto-buys in any 24 hours
 const AUTO_SKIP = new RegExp(Bun.env.ARB_AUTO_SKIP ?? "darts", "i"); // sports auto-fire never buys (live-only now, so tennis/boxing/MMA are allowed; set ARB_AUTO_SKIP=darts|boxing|... to change); table tennis is exempt below
 const missNoted = new Map<string, number>();
+// A game may be bought again only on a DIFFERENT sportsbook and the SAME Polymarket side: a second pair adds to the same hedge and each pair is checked on its own fresh prices.
+// The opposite Polymarket side would net out the first position, and the same sportsbook twice is just a repeat. prevKeys = opp_keys of this game's earlier filled buys.
+// Bovada's price in American odds for the phone alerts (+150 / -147); other books stay decimal.
+const amOdds = (n: number) => !(n > 1) ? String(n) : n >= 2 ? "+" + Math.round((n - 1) * 100) : String(Math.round(-100 / (n - 1)));
+export function mayBuyAgain(prevKeys: string[], key: string): boolean {
+  const me = /\|([ab])(~bvd)?$/.exec(key);
+  if (!me) return false;
+  return prevKeys.every((k) => { const p = /\|([ab])(~bvd)?$/.exec(k); return !!p && p[1] === me[1] && !!p[2] !== !!me[2]; });
+}
+const gameBusy = new Set<string>();   // games that have an auto-buy running right now, whichever sportsbook it is on
 const ROUTINE = /isn't active|No fresh Goated|only .* edge|edge is only|no longer|above the break-even|already running|just bought|no open price|no usable price/i;
 
 export function makeArbBuy(d: Deps) {
@@ -68,7 +78,15 @@ export function makeArbBuy(d: Deps) {
     if (!dry && Bun.env.ARB_BUY_ON !== "1") throw new Error("Real buying is switched off. Set ARB_BUY_ON=1 on this service to allow it.");
     // only auto-fire may raise the per-buy cap (never a tap on the page)
     const capUsd = body?.triggeredBy === "auto" && Number(body?.maxUsd) > 0 ? Number(body.maxUsd) : MAX_USD;
-    const bankroll = Math.min(capUsd, Math.max(2, Math.round(Number(body?.bankroll ?? DEFAULT_BANK) || DEFAULT_BANK)));
+    // A click on a card sends the two amounts that card shows (including any you typed in with the pencil), so a manual buy spends what you see on the card.
+    // Only your own clicks do this: auto-fire never sends it. The per-click cap still applies, and Polymarket's order book can still shrink the amounts.
+    let userStakes: { sb: number; pm: number } | null = null;
+    if (body?.triggeredBy !== "auto" && Number(body?.stakes?.sportsbook) > 0 && Number(body?.stakes?.polymarket) > 0) {
+      const sb0 = Number(body.stakes.sportsbook), pm0 = Number(body.stakes.polymarket);
+      if (sb0 + pm0 > capUsd * 1.05 + 1) throw new Error(`The amounts on this card add up to $${(sb0 + pm0).toFixed(2)}, over the $${capUsd} per-click cap. Nothing was bought. Lower the amounts, or raise ARB_BUY_MAX_USD.`);
+      userStakes = { sb: sb0, pm: pm0 };
+    }
+    const bankroll = userStakes ? Math.max(2, Math.round(userStakes.sb + userStakes.pm)) : Math.min(capUsd, Math.max(2, Math.round(Number(body?.bankroll ?? DEFAULT_BANK) || DEFAULT_BANK)));
 
     const [row]: any = await sql`SELECT opp_key, sport, league, player_a, player_b, profit_pct FROM arb_opps WHERE id = ${id} AND active`;
     if (!row) throw new Error("That arb isn't active any more.");
@@ -122,8 +140,15 @@ export function makeArbBuy(d: Deps) {
     const sized: any = d.sizeStakes ? await d.sizeStakes(pmSlug, long, dGt, dPm, bankroll) : undefined;
     if (sized === null) throw new Error("Polymarket's order book is too thin for even a small safe bet here right now. Nothing was bought.");
     w = sized ? [sized.sg, sized.sp] : d.wholePair(bankroll, dGt, dPm);
+    if (!w && userStakes) w = [userStakes.sb, userStakes.pm];
     if (!w) throw new Error("Couldn't find whole-dollar stakes that win either way at this bankroll.");
-    const [sg, sp] = w; // sg = sportsbook stake, sp = Polymarket cash
+    let [sg, sp] = w; // sg = sportsbook stake, sp = Polymarket cash
+    if (userStakes) {
+      // use the card's own amounts; only if Polymarket's book can't fill them are both scaled down together (the sportsbook stake stays a whole dollar)
+      const f = !sized || sized.sg + sized.sp >= bankroll * 0.9 ? 1 : (sized.sg + sized.sp) / bankroll;
+      sg = Math.max(1, Math.round(userStakes.sb * f));
+      sp = Math.round(userStakes.pm * (sg / userStakes.sb) * 100) / 100;
+    }
     if (sg < 1 || sp < 1) throw new Error("Stakes came out under $1. Try a bigger bankroll.");
     if (body?.triggeredBy === "auto" && sg + sp < AUTO_MIN_TOTAL)
       throw new Error(`Only $${sg + sp} fits Polymarket's depth here (auto-fire needs at least $${AUTO_MIN_TOTAL} in total). Nothing was bought.`);
@@ -131,7 +156,9 @@ export function makeArbBuy(d: Deps) {
 
     // check the Polymarket leg is buyable at these exact numbers BEFORE touching the sportsbook
     const tradeBody: any = { id, cash: sp, stake: sg, payout: sg * dGt };
-    if (body?.triggeredBy === "auto") tradeBody.triggeredBy = "auto"; // manual clicks stay untagged so the per-tap cap still applies
+    // Your own clicks are tagged "manual": they are held to the per-click cap above (ARB_BUY_MAX_USD, up to a $1,000 bankroll) and not to the smaller Polymarket
+    // per-trade cap, which keeps limiting auto-fire.
+    tradeBody.triggeredBy = body?.triggeredBy === "auto" ? "auto" : "manual";
     const q: any = await d.trade({ ...tradeBody, mode: "quote" });
     if (!q?.ok) throw new Error(`Polymarket's price (${(q?.p0 * 100).toFixed(1)}c) is above the break-even for these stakes. Nothing was bought.`);
 
@@ -140,7 +167,7 @@ export function makeArbBuy(d: Deps) {
     const plan = {
       dry, book: BK, match: `${row.player_a} vs ${row.player_b}`, goated: { pick: gPick, stake: sg, odds: dGt }, // 'goated' is the sportsbook leg, whichever book it is
       polymarket: { pick: pmPick, cash: sp, priceCents: Math.round(p0 * 1000) / 10 }, edgePct: Math.round(pct * 100) / 100,
-      expectedProfitUsd: Math.round((q.profitNow ?? 0) * 100) / 100, bankroll, sizedByDepth, totalStaked: sg + sp,
+      expectedProfitUsd: Math.round((q.profitNow ?? 0) * 100) / 100, bankroll, sizedByDepth, fromCard: !!userStakes, totalStaked: sg + sp,
     };
     if (dry) return plan;
 
@@ -202,7 +229,7 @@ export function makeArbBuy(d: Deps) {
 
       if (gOk && !pmDone) {
         void d.ntfy(`${BK} placed, Polymarket NOT fully hedged: ${plan.match}`,
-          `${BK} bet $${sg} on ${gPick} @ ${dGt} went through, but Polymarket filled only ${pmFilled.toFixed(2)} shares${pmErr ? " (" + pmErr + ")" : ""}. You are exposed -- finish the hedge by hand.`, "urgent");
+          `${BK} bet $${sg} on ${gPick} @ ${BK === "Bovada" ? amOdds(dGt) : dGt} went through, but Polymarket filled only ${pmFilled.toFixed(2)} shares${pmErr ? " (" + pmErr + ")" : ""}. You are exposed -- finish the hedge by hand.`, "urgent");
       } else if (gUnknown) {
         void d.ntfy(`${BK} bet status unclear: ${plan.match}`,
           `Could not confirm whether the ${BK} bet ($${sg} on ${gPick}) was placed: ${gErr}. Polymarket was NOT bought. Check ${BK} bet history.`, "urgent");
@@ -231,6 +258,14 @@ export function makeArbBuy(d: Deps) {
   const note = (text: string) => { autoLog.unshift({ at: Date.now(), text }); autoLog.length = Math.min(autoLog.length, 12); console.log("AUTO " + text); };
   const autoBusy = new Set<string>();
   const autoLast = new Map<string, number>();
+  // The on/off switch is saved in the database, so a deploy or restart no longer silently turns auto-fire off (it used to, and stayed off until someone noticed).
+  const persistAuto = (v: boolean) => { try { void Promise.resolve(d.sql`UPDATE settings SET arb_auto_on = ${v} WHERE id = 1`).catch(() => {}); } catch {} };
+  void (async () => {
+    try {
+      const [s]: any = await d.sql`SELECT arb_auto_on FROM settings WHERE id = 1`;
+      if (s?.arb_auto_on === true && !autoOn) { autoOn = true; note("restored to ON after a restart (the switch is saved)"); }
+    } catch {}
+  })();
 
   // called by the scanner every time it sees a Goated-vs-Polymarket moneyline arb
   async function autoTry(key: string, pct: number, _live: boolean, sport: string) {
@@ -248,20 +283,25 @@ export function makeArbBuy(d: Deps) {
       const m = /^([^|~]+)\|([ab])(~bvd)?$/.exec(key);
       if (!m) return;
       if (m[3] && Date.now() < bvdLoginBadUntil) return; // Bovada's login is expired: no retrying every minute until it has been fixed
+      // one buy per GAME at a time: the same game can show up as two arbs (one against Goated, one against Bovada) in the same scan. Both used to start together,
+      // before either had written its trade, and so both bought (the same Polymarket side twice). The second one now waits and then sees the first one's trade.
+      if (gameBusy.has(m[1])) return;
       if (autoBusy.has(key) || Date.now() - (autoLast.get(key) ?? 0) < 20000) return; // don't hammer the same arb every scan
       autoLast.set(key, Date.now());
       autoBusy.add(key);
+      gameBusy.add(m[1]);
       try {
         // These four database checks don't depend on each other, so they run together instead of one after another:
         // once per game (never a second buy of it, by auto-fire OR a tap on the page, on either sportsbook), the strategy bot's
         // open position on this market (table tennis only: Polymarket would net the sides), the daily auto-buy count, and the arb itself.
         const [doneRows, heldRows, cntRows, rowRows]: any[] = await Promise.all([
-          sql`SELECT 1 AS x FROM arb_trades WHERE opp_key LIKE ${m[1] + "|%"} AND filled_shares > 0 AND created_at > now() - interval '14 days' LIMIT 1`,
+          sql`SELECT DISTINCT opp_key FROM arb_trades WHERE opp_key LIKE ${m[1] + "|%"} AND filled_shares > 0 AND created_at > now() - interval '14 days'`,
           isTT ? sql`SELECT 1 AS x FROM live_trades l JOIN matches m ON m.id = l.match_id WHERE m.market_slug = ${m[1]} AND l.status = 'open' LIMIT 1` : Promise.resolve([]),
           sql`SELECT count(*)::int AS n FROM arb_trades WHERE triggered_by = 'auto' AND filled_shares > 0 AND created_at > now() - interval '24 hours'`,
           sql`SELECT id, start_time, is_live, player_a, player_b FROM arb_opps WHERE opp_key = ${key} AND active`,
         ]);
-        if (doneRows?.[0]) return;
+        const prevKeys: string[] = (doneRows ?? []).map((r: any) => String(r.opp_key));
+        if (prevKeys.length && !mayBuyAgain(prevKeys, key)) return;
         if (isTT && heldRows?.[0]) return;
         if ((cntRows?.[0]?.n ?? 0) >= AUTO_MAX_PER_DAY) return;
         const row: any = rowRows?.[0];
@@ -289,7 +329,7 @@ export function makeArbBuy(d: Deps) {
             AND ( (t.event_start IS NOT NULL AND abs(extract(epoch from (t.event_start - ${startIso}::timestamptz))) < 64800)
                OR (t.event_start IS NULL AND t.placed_at > now() - interval '4 days') )
           LIMIT 1`;
-        if (tracked) return;
+        if (tracked && !prevKeys.length) return;   // a card you added by hand blocks it; the bot's own earlier buy of this game is handled by the rule above
         note(`trying ${key} at ${pct.toFixed(1)}%`);
         const r: any = await arbBuy({ id: row.id, bankroll: AUTO_BANK, maxUsd: AUTO_BANK, dry: false, triggeredBy: "auto" });
         const nothingPlaced = !r?.goated?.ok && !(Number(r?.polymarket?.filledShares ?? 0) > 0) && !/may (still )?have been placed|may or may not|unclear|unreadable/i.test(String(r?.goated?.error ?? ""));
@@ -301,11 +341,12 @@ export function makeArbBuy(d: Deps) {
         const clean = r?.goated?.ok && r?.polymarket?.done;
         note(`${r?.plan?.match ?? key}: ${r?.plan?.book ?? "Goated"} ${r?.goated?.ok ? "ok" : "FAILED"}, Polymarket ${r?.polymarket?.done ? "done" : "NOT done"}`);
         if (!clean) {
-          autoOn = false; // anything short of two clean legs stops auto-fire until you switch it back on
+          autoOn = false; persistAuto(false); // anything short of two clean legs stops auto-fire until you switch it back on
           void d.ntfy("Auto-fire switched itself OFF", `The last auto-buy (${r?.plan?.match ?? key}) was not clean: ${r?.plan?.book ?? "Goated"} ${r?.goated?.ok ? "ok" : "failed (" + (r?.goated?.error ?? "?") + ")"}, Polymarket ${r?.polymarket?.done ? "done" : "incomplete"}. Check your positions, then switch it back on at the /auto page.`, "urgent");
         }
       } finally {
         autoBusy.delete(key);
+        gameBusy.delete(m[1]);
       }
     } catch (e: any) {
       const msg = String(e?.message ?? e);
@@ -325,6 +366,7 @@ export function makeArbBuy(d: Deps) {
   }
   async function autoSet(body: any) {
     autoOn = body?.on === true;
+    persistAuto(autoOn);
     note(autoOn ? "switched ON from the page" : "switched OFF from the page");
     return autoStatus();
   }
