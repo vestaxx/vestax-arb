@@ -588,9 +588,9 @@ const GT_CONC = Number(Bun.env.ARB_GT_CONC ?? 3), GT_PAUSE_MS = Number(Bun.env.A
 // ...and requests are also PACED: a new one may start only every GT_GAP_MS (default 250 ms, about 4 a second). Limiting how many run at once was not enough: the log showed
 // Goated refusing even the first request after every pause, which means it limits the rate over time, not just bursts. Two lanes: the per-game market lookups that live
 // arbs depend on go first (hi), the big catalogue refresh waits its turn (lo).
-// The gap is ADAPTIVE because Goated does not publish its limit: it starts at ARB_GT_GAP_MS, grows by half after every 429 (up to 1.5 s), and eases back down
-// 3% per good answer once 20 s have passed without a 429, so it settles just under whatever Goated will accept.
-const GT_GAP_MS = Number(Bun.env.ARB_GT_GAP_MS ?? 300), GT_GAP_MIN = 150, GT_GAP_MAX = 1500;
+// The gap is ADAPTIVE because Goated does not publish its limit: it starts at ARB_GT_GAP_MS, grows 30% after every 429 (up to 1 s), and eases back down
+// 5% per good answer once 15 s have passed without a 429, so it settles just under whatever Goated will accept.
+const GT_GAP_MS = Number(Bun.env.ARB_GT_GAP_MS ?? 300), GT_GAP_MIN = 150, GT_GAP_MAX = 1000;
 let gtGap = GT_GAP_MS, gtLast429 = 0;
 let gtActive = 0, gtPauseUntil = 0, gtNext = 0, gtPumping = false;
 let gtWake: (() => void) | null = null;
@@ -621,8 +621,8 @@ async function gtGate<T>(fn: () => Promise<T>, hi = false): Promise<T> {
 // tries = how many 429 retries; the wait is capped at 3 s so one throttled call can no longer hold a whole scan for half a minute.
 async function gt(path: string, attempt = 0, tries = 3, hi = false): Promise<any> {
   const r = await gtGate(() => fetch(GT + path, { headers: { "user-agent": UA, accept: "application/json" } }), hi);
-  if (r.status === 429) { gtPauseUntil = Math.max(gtPauseUntil, Date.now() + GT_PAUSE_MS); gtGap = Math.min(GT_GAP_MAX, Math.round(gtGap * 1.5)); gtLast429 = Date.now(); }
-  else if (r.ok && Date.now() - gtLast429 > 20000) gtGap = Math.max(GT_GAP_MIN, gtGap * 0.97);
+  if (r.status === 429) { gtPauseUntil = Math.max(gtPauseUntil, Date.now() + GT_PAUSE_MS); gtGap = Math.min(GT_GAP_MAX, Math.round(gtGap * 1.3)); gtLast429 = Date.now(); }
+  else if (r.ok && Date.now() - gtLast429 > 15000) gtGap = Math.max(GT_GAP_MIN, gtGap * 0.95);
   if (r.status === 429 && attempt < tries) {
     const ra = Number(r.headers.get("retry-after"));
     await Bun.sleep(Math.min(3000, Number.isFinite(ra) && ra > 0 ? ra * 1000 : 800 * (attempt + 1)));
@@ -759,6 +759,11 @@ async function refreshGoated() {
   });
   const m = new Map<string, any>();
   const ttIds = new Set<string>();
+  // After a restart the catalogue is empty, and the paced refresh takes minutes: publish what has been loaded so far every 15 tournaments, so Goated games start
+  // appearing within seconds instead of only when the whole refresh finishes. Later refreshes still swap in at the end, so a half-loaded list never replaces a good one.
+  const firstLoad = gtEvents.size === 0;
+  let doneT = 0;
+  const publishPartial = () => { gtEvents = new Map(m); gtTtAllIds = new Set(ttIds); gtTeamList = [...gtEvents.values()].filter((e: any) => TEAM_SPORTS.test(e.sport.name)); };
   await pool(tourns, 4, async (t) => {
     try {
       for (const e of (await gt(`/listing/tournament/${t.slug}/all-events?lang=en`)) ?? []) {
@@ -769,6 +774,7 @@ async function refreshGoated() {
         m.set(pairKey(comps[0].id, comps[1].id), { slug: e.slug, status: e.status, scheduled: e.scheduled, league: t.name, sport: t.sport, comps, url });
       }
     } catch (e: any) { console.error("goated tournament failed", t.slug, e?.message ?? e); }
+    if (firstLoad && ++doneT % 15 === 0) publishPartial();
   });
   gtEvents = m;
   gtTtAllIds = ttIds;
