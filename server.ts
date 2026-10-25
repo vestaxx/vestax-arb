@@ -2298,15 +2298,24 @@ const AUTO_SETTLE_MAX_EDGE = Number(Bun.env.ARB_AUTO_SETTLE_MAX_EDGE ?? 8);
 const settleNoted = new Set<string>();
 const unsettledAt = new Map<number, number>();
 const waitingAt = new Map<number, number>();
-// PLAYER PROPS: the Polymarket catalogue this scanner reads has no prop markets at all (26 market types, none for receptions / yards / touchdowns), so a card added
-// from a prop fill can't be matched to a market. Before building the matcher, ask Polymarket's own API how it lists them and write what it says to the log, once per card.
-const propProbed = new Set<number>();
+// PLAYER PROPS: the Polymarket list this scanner reads (events.list) has no prop markets at all, but a single game fetched with events.retrieveBySlug carries all of its
+// markets (744 for one NFL game), props included. So a card added from a prop fill ("Woody Marks 3+ receptions (YES)") is matched by fetching its game and looking for the
+// one market that mentions the player, the stat and the number. The market is saved with the card, and settles from Polymarket's own result like a game card.
+const propTried = new Map<number, number>();
 const looksLikeProp = (ev: string) => /receptions|rushing|passing|receiving|touchdown|yards|rebounds|assists|strikeouts|points|goals scored|\(middle|\bprop\b/i.test(ev);
-async function probeProp(t: any) {
-  if (propProbed.has(t.id)) return;
-  propProbed.add(t.id);
-  const ev = String(t.event ?? "");
-  const hay = new Set(nameToks(ev));
+function parseProp(pick: string) {
+  const m = /^(.+?)\s+(\d+(?:\.\d+)?)\+\s+(.+?)\s*\((YES|NO)\)\s*$/i.exec(pick.trim());   // "Woody Marks 3+ receptions (YES)"
+  if (!m) return null;
+  return { player: m[1].trim(), thr: m[2], statWords: nameToks(m[3]).map((w) => w.replace(/s$/, "")), long: m[4].toUpperCase() === "YES" };
+}
+async function findPmProp(t: any): Promise<{ slug: string; long: boolean } | null> {
+  if (Date.now() - (propTried.get(t.id) ?? 0) < 600000) return null;   // at most one lookup per card every 10 minutes
+  propTried.set(t.id, Date.now());
+  const pmIsA = t.a_book === "polymarket";
+  const pick = String(pmIsA ? t.a_pick : t.b_pick);
+  const pp = parseProp(pick);
+  if (!pp) { console.log(`PROP-MATCH #${t.id}: can't read "${pick}" as "<player> <number>+ <stat> (YES/NO)"`); return null; }
+  const hay = new Set(nameToks(String(t.event)));
   let gameSlug = "";
   for (const arr of [pmGames, pmNameGames]) for (const g of arr ?? []) {
     const n = pmSideNames(g), slug = g?.wm?.slug;
@@ -2314,22 +2323,42 @@ async function probeProp(t: any) {
     const ok = (nm: string) => { const tk = nameToks(nm); return tk.length > 0 && tk.every((w) => hay.has(w)); };
     if (ok(n[0]) && ok(n[1])) gameSlug = String(slug).replace(/^aec-/, "");
   }
-  const pick = String(t.a_book === "polymarket" ? t.a_pick : t.b_pick);
-  const player = (/^([A-Za-z .'\-]+?)\s+(?:\d|under|over|anytime)/i.exec(pick)?.[1] ?? pick).trim();
-  const sdk: any = pm;
-  const out: string[] = [];
-  const tryCall = async (label: string, fn: () => Promise<any>) => {
-    try { out.push(`${label}: ${JSON.stringify(await fn()).slice(0, 1400)}`); } catch (e: any) { out.push(`${label} FAILED: ${String(e?.message ?? e).slice(0, 150)}`); }
-  };
-  await tryCall("events.retrieveBySlug", async () => {
-    const r = await sdk.events.retrieveBySlug(gameSlug);
-    const ev2 = r?.event ?? r; const ms = ev2?.markets ?? [];
-    return { keys: Object.keys(r ?? {}), eventKeys: Object.keys(ev2 ?? {}).slice(0, 30), markets: ms.length, sample: ms.slice(0, 8).map((m: any) => ({ slug: m.slug, type: m.sportsMarketType, v2: m.sportsMarketTypeV2, q: m.question ?? m.title ?? m.description })) };
-  });
-  await tryCall("search.query", async () => { const r = await sdk.search.query({ query: player }); return { keys: Object.keys(r ?? {}), r }; });
-  await tryCall("markets.list", async () => { const r = await sdk.markets.list({ limit: 5, query: player }); return r; });
-  console.log(`PROP-PROBE #${t.id} "${ev}" game=${gameSlug || "(not found)"} player="${player}" pick="${pick}"\n  ${out.join("\n  ")}`);
+  if (!gameSlug) { console.log(`PROP-MATCH #${t.id}: no Polymarket game found for "${t.event}"`); return null; }
+  const r: any = await (pm as any).events.retrieveBySlug(gameSlug);
+  const markets: any[] = (r?.event ?? r)?.markets ?? [];
+  const lc = (x: any) => String(x ?? "").toLowerCase();
+  const hasNum = (text: string, n: string) => new RegExp("(^|[^0-9.])" + n.replace(".", "\\.") + "([^0-9]|$)").test(text);
+  const nameT = nameToks(pp.player);
+  const mentions: any[] = [], best: any[] = [];
+  for (const m of markets) {
+    const text = lc(m.question) + " " + lc(m.description) + " " + lc(m.slug);
+    if (!nameT.every((w) => text.includes(w))) continue;
+    mentions.push(m);
+    if (pp.statWords.every((w) => text.includes(w)) && hasNum(text, pp.thr)) best.push(m);
+  }
+  if (best.length === 1) {
+    // settlement is read for the market's LONG side; make sure that side is "Yes" (if the market lists Yes as the short side, the card's side flips)
+    const sides: any[] = best[0].marketSides ?? [];
+    const yes = sides.find((x: any) => /^yes$/i.test(String(x?.description ?? "")));
+    const yesIsLong = yes ? yes.long !== false : true;
+    return { slug: String(best[0].slug), long: yesIsLong ? pp.long : !pp.long };
+  }
+  console.log(`PROP-MATCH #${t.id} ${pick}: ${best.length ? "several markets fit" : "no market fits"} (game ${gameSlug}, ${markets.length} markets, ${mentions.length} mention "${pp.player}"). Candidates: ` +
+    (best.length ? best : mentions).slice(0, 12).map((m: any) => `[${m.slug} | ${String(m.question ?? "").slice(0, 90)} | sides ${(m.marketSides ?? []).map((x: any) => x.description + ":" + x.long).join("/")}]`).join(" "));
+  return null;
 }
+// is theScore reachable from here? (it has no official API; the old unofficial one is checked once and the answer written to the log)
+async function probeTheScore() {
+  const day = new Date().toISOString().slice(0, 10);
+  for (const [label, url] of [["events", `https://api.thescore.com/nfl/events?game_date.in=${day}`], ["current", "https://api.thescore.com/nfl/events/current"], ["site", "https://www.thescore.com/nfl/events"]] as [string, string][]) {
+    try {
+      const r = await fetch(url, { headers: { "user-agent": UA, accept: "application/json" }, signal: AbortSignal.timeout(10000) });
+      const txt = await r.text();
+      console.log(`THESCORE-PROBE ${label}: HTTP ${r.status}, ${txt.length} bytes, starts: ${txt.slice(0, 260).replace(/\s+/g, " ")}`);
+    } catch (e: any) { console.log(`THESCORE-PROBE ${label} FAILED: ${String(e?.message ?? e).slice(0, 120)}`); }
+  }
+}
+setTimeout(() => void probeTheScore(), 90_000);
 const nudged = new Set<number>();
 // a card whose Polymarket market hasn't settled yet used to say nothing at all. Log what Polymarket reports for it (once an hour) so "waiting" and "can't read it"
 // look different, and after 10 hours tell the phone once, so a card that is finished on Polymarket but not here gets noticed.
@@ -2440,7 +2469,14 @@ async function settleOpenArbs() {
           console.log(`ARB-SETTLE #${t.id} ${t.event}: found its Polymarket market now (${found.slug}) and saved it`);
         }
       }
-      if ((!slug || pmLong === null) && looksLikeProp(String(t.event))) void probeProp(t);
+      if ((!slug || pmLong === null) && (pmIsA || pmIsB) && looksLikeProp(String(t.event))) {
+        const fp = await findPmProp(t).catch((e: any) => { console.log(`PROP-MATCH #${t.id} failed: ${String(e?.message ?? e).slice(0, 160)}`); return null; });
+        if (fp) {
+          slug = fp.slug; pmLong = fp.long;
+          try { await sql`UPDATE arb_tracker SET pm_slug = ${fp.slug}, pm_long = ${fp.long} WHERE id = ${t.id}`; } catch {}
+          console.log(`ARB-SETTLE #${t.id} ${t.event}: found its Polymarket prop market (${fp.slug}) and saved it`);
+        }
+      }
       if (!slug || pmLong === null) { unsettled(t, "I can't find this game's Polymarket market (it was never listed on the scanner and wasn't recognised when you added it) | " + nearestPm(String(t.event))); continue; }
       const v = await pmSettlementValue(slug);
       if (v === null) { void waiting(t, slug); continue; } // not resolved yet
@@ -2459,6 +2495,12 @@ async function settleOpenArbs() {
         continue;
       }
       const pmWon = pmLong ? v >= 0.5 : v < 0.5;
+      // a MIDDLE (two lines on the same player) can have both legs win. If the Polymarket leg lost, the other leg is certain to have won; if it won, only the real final
+      // stat says whether the other one did too, and this has no stat feed yet, so it asks you.
+      if (/\(middle/i.test(String(t.event)) && pmWon) {
+        noteOnce("middle", `Settle by hand: ${t.event}`, `Polymarket's leg won. This card is a middle, so the other book may have won too: check the final stat and settle it yourself.`);
+        continue;
+      }
       const pmLetter = pmIsA ? "a" : "b", otherLetter = pmIsA ? "b" : "a";
       const winner = pmWon ? pmLetter : otherLetter;
       const returned = Number(winner === "a" ? t.a_payout : t.b_payout);
