@@ -740,8 +740,9 @@ let gtCatAt = 0;
 // with real evidence rather than eyeballing a handful of samples, whether PM's and Goated's id
 // schemes for table tennis can ever line up.
 let gtTtAllIds = new Set<string>();
+const GT_CAT_TTL_MS = Number(Bun.env.ARB_GT_CAT_TTL_MS ?? 420000);   // tournament event lists change slowly; refreshing ~200 of them every 4 minutes was a big share of the Goated traffic
 async function refreshGoated() {
-  if (Date.now() - gtCatAt < 240000 && gtEvents.size) return;
+  if (Date.now() - gtCatAt < GT_CAT_TTL_MS && gtEvents.size) return;
   const sports = (await gt("/listing/sports?lang=en")) ?? [];
   if (!gtCatAt) console.log(`RAW GOATED SPORTS: ${JSON.stringify(sports.map((s: any) => ({ name: s.name, slug: s.slug, markets: (s.defaultMarkets ?? []).map((m: any) => m.name) })))}`);
   gtSports = sports
@@ -861,16 +862,18 @@ async function gtMarkets(ev: any): Promise<{ winner: Record<string, number> | nu
 const GM_TTL_LIVE_MS = Number(Bun.env.ARB_GM_TTL_LIVE_MS ?? 6000), GM_TTL_PRE_MS = Number(Bun.env.ARB_GM_TTL_PRE_MS ?? 90000);
 const GM_STALE_OK_LIVE_MS = 15000, GM_STALE_OK_PRE_MS = 240000;   // how old a last-good answer may be and still be used when a refresh fails
 type GmVal = { winner: Record<string, number> | null; totals: GtTot; hand: GtHand };
-const gmStore = new Map<string, { at: number; ttl: number; p: Promise<GmVal>; good?: { v: GmVal; at: number } }>();
-const gmCached = (ge: any) => {
+const gmStore = new Map<string, { at: number; ttl: number; ok?: boolean; p: Promise<GmVal>; good?: { v: GmVal; at: number } }>();
+// maxAge (optional) lets a caller that does not need fresh prices accept an older good answer: the cross-book pairs ask for up to 5 minutes on pre-match games, which
+// cuts the number of Goated requests a lot. A remembered failure is never stretched by it.
+const gmCached = (ge: any, maxAge?: number) => {
   const now = Date.now(), e = gmStore.get(ge.slug), live = ge?.status === "live";
-  if (e && now - e.at < e.ttl) return e.p;
+  if (e && now - e.at < (e.ok && maxAge ? Math.max(e.ttl, maxAge) : e.ttl)) return e.p;
   const prevGood = e?.good;
-  const ent: { at: number; ttl: number; p: Promise<GmVal>; good?: { v: GmVal; at: number } } = { at: now, ttl: live ? GM_TTL_LIVE_MS : GM_TTL_PRE_MS, p: null as any, good: prevGood };
+  const ent: { at: number; ttl: number; ok?: boolean; p: Promise<GmVal>; good?: { v: GmVal; at: number } } = { at: now, ttl: live ? GM_TTL_LIVE_MS : GM_TTL_PRE_MS, p: null as any, good: prevGood };
   ent.p = gtMarkets(ge).then(
-    (v) => { ent.good = { v, at: Date.now() }; return v; },
+    (v) => { ent.good = { v, at: Date.now() }; ent.ok = true; return v; },
     (err) => {
-      ent.at = Date.now(); ent.ttl = 20000;   // remember the failure for 20 s instead of retrying it in every job of every scan
+      ent.ok = false; ent.at = Date.now(); ent.ttl = 20000;   // remember the failure for 20 s instead of retrying it in every job of every scan
       // a throttled refresh is not a reason to lose the game: keep using the last good answer while it is recent enough
       if (prevGood && Date.now() - prevGood.at < (live ? GM_STALE_OK_LIVE_MS : GM_STALE_OK_PRE_MS)) return prevGood.v;
       throw err;
@@ -1676,6 +1679,7 @@ async function upsertArb(r: { key: string; sport: string; league: string; market
 }
 // Time budgets so the paced Goated lookups can never hold the live pass hostage: the pre-match sweep stops after PRE_BUDGET_MS (whatever is left stays due and goes first
 // next time), and the Goated side of a cross-book pair for a pre-match game is only fetched in the first CROSS_BUDGET_MS of a scan (later scans fill the cache).
+let scanPhases = "";
 const PRE_BUDGET_MS = Number(Bun.env.ARB_PRE_BUDGET_MS ?? 20000), CROSS_BUDGET_MS = Number(Bun.env.ARB_CROSS_BUDGET_MS ?? 15000);
 async function scan(): Promise<number> {
   const scanT0 = Date.now();
@@ -1733,7 +1737,7 @@ async function scan(): Promise<number> {
       const cross: CrossEntry[] = [];
       if (ge && FEED_BOOKS.some((bk) => (fb as any)[bk]) && (lP || gmStore.has(ge.slug) || Date.now() - scanT0 < CROSS_BUDGET_MS)) {
         try {
-          const gm = await gmCached(ge);
+          const gm = await gmCached(ge, lP ? 20000 : 300000);
           const oA = gm.winner?.[g.lid], oB = gm.winner?.[g.sid];
           if (oA && oA > 1 && oB && oB > 1) cross.push({ book: "goated", oddsA: oA, oddsB: oB, url: ge.url, league: ge.league });
         } catch (e: any) { console.error("goated cross fetch failed", e?.message ?? e); }
@@ -1749,6 +1753,7 @@ async function scan(): Promise<number> {
       }
     }
   });
+  const tPhaseA = Date.now();
   if (diag) {
     const tt = pmGames.filter((g) => /^table_tennis/i.test(String(g.t)));
     const anySide = tt.filter((g) => gtTtAllIds.has(g.lid) || gtTtAllIds.has(g.sid)).length;
@@ -2159,9 +2164,12 @@ async function scan(): Promise<number> {
   // (what matters for staleness is how fresh the LIVE arbs are).
   await pool(jobs.filter((j: any) => j.live), 4, runJob);
   try { await sql`UPDATE arb_status SET last_scan = now() WHERE id = 1`; } catch {}
+  const tPhaseB = Date.now();
   const preStart = Date.now();
   const preJobs = jobs.filter((j: any) => !j.live).sort((x: any, y: any) => (lastChecked.get(jk(x)) ?? 0) - (lastChecked.get(jk(y)) ?? 0));   // most overdue first
   await pool(preJobs, 4, async (j: any) => { if (Date.now() - preStart > PRE_BUDGET_MS) return; await runJob(j); });
+  const tPhaseC = Date.now();
+  scanPhases = `matching+cross ${((tPhaseA - scanT0) / 1000).toFixed(0)}s, live jobs ${((tPhaseB - tPhaseA) / 1000).toFixed(0)}s, pre-match jobs ${((tPhaseC - tPhaseB) / 1000).toFixed(0)}s (live ${live.length}, pre ${preJobs.length}), goated gap ${Math.round(gtGap)}ms`;
   if (diag) console.log(`Matched games by sport: ${JSON.stringify(matchedPer)} (live ${live.length}, pre due ${pre.length}, ${fullSweep ? "full sweep" : "live-only"}) | by name: ${nmMatched} matched, ${nmUnmatched} unmatched | bet105 ${feedEvs.bet105.length} games/${feedN.bet105} matched, bovada ${feedEvs.bovada.length} games/${feedN.bovada} matched, gemini ${feedEvs.gemini.length} games/${feedN.gemini} matched | esports maps: ${pmMapGames.length} PM/${mapMatchedN} matched vs bovada | cross-book games: ${crossN} | blocked: ${blockedN} | fill-check drops: ${lqSkip} | over-cap drops (>${FEED_MAX_PCT}%): ${capSkip} | mem ${Math.round(process.memoryUsage().rss / 1048576)}MB`);
   await sql`UPDATE arb_opps SET active = false WHERE active AND last_seen < now() - interval '3 minutes'`;
   closeList.sort((a, b) => b.pct - a.pct);
@@ -2180,7 +2188,7 @@ async function scan(): Promise<number> {
   while (true) {
     const t = Date.now();
     let liveCount = 0;
-    try { liveCount = await scan(); const took = Date.now() - t; if (took > 30000) console.log(`SLOW scan: ${(took / 1000).toFixed(0)}s (the page calls the scanner stale after 45s)`); } catch (e: any) {
+    try { liveCount = await scan(); const took = Date.now() - t; if (took > 30000) console.log(`SLOW scan: ${(took / 1000).toFixed(0)}s [${scanPhases}] (the page calls the scanner stale after 45s)`); } catch (e: any) {
       console.error("scan failed:", e?.message ?? e);
       try { await sql`UPDATE arb_status SET note = ${String(e?.message ?? e).slice(0, 200)} WHERE id = 1`; } catch {}
     }
@@ -2290,6 +2298,38 @@ const AUTO_SETTLE_MAX_EDGE = Number(Bun.env.ARB_AUTO_SETTLE_MAX_EDGE ?? 8);
 const settleNoted = new Set<string>();
 const unsettledAt = new Map<number, number>();
 const waitingAt = new Map<number, number>();
+// PLAYER PROPS: the Polymarket catalogue this scanner reads has no prop markets at all (26 market types, none for receptions / yards / touchdowns), so a card added
+// from a prop fill can't be matched to a market. Before building the matcher, ask Polymarket's own API how it lists them and write what it says to the log, once per card.
+const propProbed = new Set<number>();
+const looksLikeProp = (ev: string) => /receptions|rushing|passing|receiving|touchdown|yards|rebounds|assists|strikeouts|points|goals scored|\(middle|\bprop\b/i.test(ev);
+async function probeProp(t: any) {
+  if (propProbed.has(t.id)) return;
+  propProbed.add(t.id);
+  const ev = String(t.event ?? "");
+  const hay = new Set(nameToks(ev));
+  let gameSlug = "";
+  for (const arr of [pmGames, pmNameGames]) for (const g of arr ?? []) {
+    const n = pmSideNames(g), slug = g?.wm?.slug;
+    if (!n || !slug) continue;
+    const ok = (nm: string) => { const tk = nameToks(nm); return tk.length > 0 && tk.every((w) => hay.has(w)); };
+    if (ok(n[0]) && ok(n[1])) gameSlug = String(slug).replace(/^aec-/, "");
+  }
+  const pick = String(t.a_book === "polymarket" ? t.a_pick : t.b_pick);
+  const player = (/^([A-Za-z .'\-]+?)\s+(?:\d|under|over|anytime)/i.exec(pick)?.[1] ?? pick).trim();
+  const sdk: any = pm;
+  const out: string[] = [];
+  const tryCall = async (label: string, fn: () => Promise<any>) => {
+    try { out.push(`${label}: ${JSON.stringify(await fn()).slice(0, 1400)}`); } catch (e: any) { out.push(`${label} FAILED: ${String(e?.message ?? e).slice(0, 150)}`); }
+  };
+  await tryCall("events.retrieveBySlug", async () => {
+    const r = await sdk.events.retrieveBySlug(gameSlug);
+    const ev2 = r?.event ?? r; const ms = ev2?.markets ?? [];
+    return { keys: Object.keys(r ?? {}), eventKeys: Object.keys(ev2 ?? {}).slice(0, 30), markets: ms.length, sample: ms.slice(0, 8).map((m: any) => ({ slug: m.slug, type: m.sportsMarketType, v2: m.sportsMarketTypeV2, q: m.question ?? m.title ?? m.description })) };
+  });
+  await tryCall("search.query", async () => { const r = await sdk.search.query({ query: player }); return { keys: Object.keys(r ?? {}), r }; });
+  await tryCall("markets.list", async () => { const r = await sdk.markets.list({ limit: 5, query: player }); return r; });
+  console.log(`PROP-PROBE #${t.id} "${ev}" game=${gameSlug || "(not found)"} player="${player}" pick="${pick}"\n  ${out.join("\n  ")}`);
+}
 const nudged = new Set<number>();
 // a card whose Polymarket market hasn't settled yet used to say nothing at all. Log what Polymarket reports for it (once an hour) so "waiting" and "can't read it"
 // look different, and after 10 hours tell the phone once, so a card that is finished on Polymarket but not here gets noticed.
@@ -2400,6 +2440,7 @@ async function settleOpenArbs() {
           console.log(`ARB-SETTLE #${t.id} ${t.event}: found its Polymarket market now (${found.slug}) and saved it`);
         }
       }
+      if ((!slug || pmLong === null) && looksLikeProp(String(t.event))) void probeProp(t);
       if (!slug || pmLong === null) { unsettled(t, "I can't find this game's Polymarket market (it was never listed on the scanner and wasn't recognised when you added it) | " + nearestPm(String(t.event))); continue; }
       const v = await pmSettlementValue(slug);
       if (v === null) { void waiting(t, slug); continue; } // not resolved yet
