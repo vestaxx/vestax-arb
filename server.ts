@@ -582,13 +582,51 @@ const pairKey = (a: string, b: string) => [a, b].sort().join("-");
 // dropped that tournament's events for the whole cycle, which is why the catalogue was flickering
 // between a tiny, inconsistent subset of sports refresh to refresh instead of holding steady.
 // Retrying a 429 after a short wait, honoring Retry-After if Goated sends one, is the direct fix.
+// Every Goated request goes through one shared gate: at most GT_CONC at a time, and after any 429 everyone pauses GT_PAUSE_MS. The catalogue refresh and the per-game
+// market lookups used to fire together (10+ at once) and trigger a storm of 429s; that, not the sweep size, is what made scans run past the 45-second stale line.
+const GT_CONC = Number(Bun.env.ARB_GT_CONC ?? 3), GT_PAUSE_MS = Number(Bun.env.ARB_GT_PAUSE_MS ?? 2000);
+// ...and requests are also PACED: a new one may start only every GT_GAP_MS (default 250 ms, about 4 a second). Limiting how many run at once was not enough: the log showed
+// Goated refusing even the first request after every pause, which means it limits the rate over time, not just bursts. Two lanes: the per-game market lookups that live
+// arbs depend on go first (hi), the big catalogue refresh waits its turn (lo).
+// The gap is ADAPTIVE because Goated does not publish its limit: it starts at ARB_GT_GAP_MS, grows by half after every 429 (up to 1.5 s), and eases back down
+// 3% per good answer once 20 s have passed without a 429, so it settles just under whatever Goated will accept.
+const GT_GAP_MS = Number(Bun.env.ARB_GT_GAP_MS ?? 300), GT_GAP_MIN = 150, GT_GAP_MAX = 1500;
+let gtGap = GT_GAP_MS, gtLast429 = 0;
+let gtActive = 0, gtPauseUntil = 0, gtNext = 0, gtPumping = false;
+let gtWake: (() => void) | null = null;
+const gtQ: { hi: (() => void)[]; lo: (() => void)[] } = { hi: [], lo: [] };
+function gtPump() {
+  if (gtPumping) return;
+  gtPumping = true;
+  (async () => {
+    try {
+      while (gtQ.hi.length || gtQ.lo.length) {
+        if (gtActive >= GT_CONC) { await new Promise<void>((r) => { gtWake = r; }); continue; }
+        const wait = Math.max(gtNext, gtPauseUntil) - Date.now();
+        if (wait > 0) { await Bun.sleep(wait); continue; }
+        const grant = gtQ.hi.shift() ?? gtQ.lo.shift();
+        if (!grant) continue;
+        gtNext = Date.now() + gtGap;
+        gtActive++;
+        grant();
+      }
+    } finally { gtPumping = false; }
+  })();
+}
+async function gtGate<T>(fn: () => Promise<T>, hi = false): Promise<T> {
+  await new Promise<void>((r) => { (hi ? gtQ.hi : gtQ.lo).push(r); gtPump(); });
+  try { return await fn(); }
+  finally { gtActive--; const w = gtWake; gtWake = null; w?.(); gtPump(); }
+}
 // tries = how many 429 retries; the wait is capped at 3 s so one throttled call can no longer hold a whole scan for half a minute.
-async function gt(path: string, attempt = 0, tries = 3): Promise<any> {
-  const r = await fetch(GT + path, { headers: { "user-agent": UA, accept: "application/json" } });
+async function gt(path: string, attempt = 0, tries = 3, hi = false): Promise<any> {
+  const r = await gtGate(() => fetch(GT + path, { headers: { "user-agent": UA, accept: "application/json" } }), hi);
+  if (r.status === 429) { gtPauseUntil = Math.max(gtPauseUntil, Date.now() + GT_PAUSE_MS); gtGap = Math.min(GT_GAP_MAX, Math.round(gtGap * 1.5)); gtLast429 = Date.now(); }
+  else if (r.ok && Date.now() - gtLast429 > 20000) gtGap = Math.max(GT_GAP_MIN, gtGap * 0.97);
   if (r.status === 429 && attempt < tries) {
     const ra = Number(r.headers.get("retry-after"));
     await Bun.sleep(Math.min(3000, Number.isFinite(ra) && ra > 0 ? ra * 1000 : 800 * (attempt + 1)));
-    return gt(path, attempt + 1, tries);
+    return gt(path, attempt + 1, tries, hi);
   }
   if (!r.ok) throw new Error(`goated ${r.status} ${path}`);
   return (await r.json())?.data;
@@ -806,7 +844,7 @@ function gtHandicapFrom(mk: any[]): GtHand {
   return out;
 }
 async function gtMarkets(ev: any): Promise<{ winner: Record<string, number> | null; totals: GtTot; hand: GtHand }> {
-  const mk = (await gt(`/event/${ev.slug}/formatted-markets?lang=en&category=all`, 0, 1)) ?? [];
+  const mk = (await gt(`/event/${ev.slug}/formatted-markets?lang=en&category=all`, 0, 1, true)) ?? [];
   const team = TEAM_SPORTS.test(ev.sport.name);
   return { winner: gtWinnerFrom(mk, ev), totals: team ? gtTotalsFrom(mk) : (new Map() as GtTot), hand: team ? gtHandicapFrom(mk) : [] };
 }
@@ -814,14 +852,24 @@ async function gtMarkets(ev: any): Promise<{ winner: Record<string, number> | nu
 // Goated's per-game markets, cached ACROSS scans (it used to be refetched for every game in every scan, which got us rate-limited with 429s and made scans
 // run past the page's 45-second "stale" line). Live games stay fresh for 6 s, pre-match games for 45 s, and a failed fetch is remembered for 20 s instead of
 // being retried by every job in every scan. The buy itself always re-reads the real Goated price.
-const GM_TTL_LIVE_MS = Number(Bun.env.ARB_GM_TTL_LIVE_MS ?? 6000), GM_TTL_PRE_MS = Number(Bun.env.ARB_GM_TTL_PRE_MS ?? 45000);
-const gmStore = new Map<string, { at: number; ttl: number; p: Promise<{ winner: Record<string, number> | null; totals: GtTot; hand: GtHand }> }>();
+const GM_TTL_LIVE_MS = Number(Bun.env.ARB_GM_TTL_LIVE_MS ?? 6000), GM_TTL_PRE_MS = Number(Bun.env.ARB_GM_TTL_PRE_MS ?? 90000);
+const GM_STALE_OK_LIVE_MS = 15000, GM_STALE_OK_PRE_MS = 240000;   // how old a last-good answer may be and still be used when a refresh fails
+type GmVal = { winner: Record<string, number> | null; totals: GtTot; hand: GtHand };
+const gmStore = new Map<string, { at: number; ttl: number; p: Promise<GmVal>; good?: { v: GmVal; at: number } }>();
 const gmCached = (ge: any) => {
-  const now = Date.now(), e = gmStore.get(ge.slug);
+  const now = Date.now(), e = gmStore.get(ge.slug), live = ge?.status === "live";
   if (e && now - e.at < e.ttl) return e.p;
-  const ent = { at: now, ttl: ge?.status === "live" ? GM_TTL_LIVE_MS : GM_TTL_PRE_MS, p: gtMarkets(ge) };
+  const prevGood = e?.good;
+  const ent: { at: number; ttl: number; p: Promise<GmVal>; good?: { v: GmVal; at: number } } = { at: now, ttl: live ? GM_TTL_LIVE_MS : GM_TTL_PRE_MS, p: null as any, good: prevGood };
+  ent.p = gtMarkets(ge).then(
+    (v) => { ent.good = { v, at: Date.now() }; return v; },
+    (err) => {
+      ent.at = Date.now(); ent.ttl = 20000;   // remember the failure for 20 s instead of retrying it in every job of every scan
+      // a throttled refresh is not a reason to lose the game: keep using the last good answer while it is recent enough
+      if (prevGood && Date.now() - prevGood.at < (live ? GM_STALE_OK_LIVE_MS : GM_STALE_OK_PRE_MS)) return prevGood.v;
+      throw err;
+    });
   gmStore.set(ge.slug, ent);
-  ent.p.catch(() => { ent.at = Date.now(); ent.ttl = 20000; });
   return ent.p;
 };
 type FeedEv = { teams: [string, string]; spreads: { team: string; line: number; odds: number }[]; totals: { line: number; over?: number; under?: number }[]; ml: Record<string, number>; live: boolean; start?: number; url?: string; link?: string; league?: string; sport?: string; mapMl?: Record<number, Record<string, number>>; mlIds?: Record<string, string>; bid?: string; home?: string };
@@ -1620,7 +1668,11 @@ async function upsertArb(r: { key: string; sport: string; league: string; market
     RETURNING first_seen`;
   return up?.[0]?.first_seen;
 }
+// Time budgets so the paced Goated lookups can never hold the live pass hostage: the pre-match sweep stops after PRE_BUDGET_MS (whatever is left stays due and goes first
+// next time), and the Goated side of a cross-book pair for a pre-match game is only fetched in the first CROSS_BUDGET_MS of a scan (later scans fill the cache).
+const PRE_BUDGET_MS = Number(Bun.env.ARB_PRE_BUDGET_MS ?? 20000), CROSS_BUDGET_MS = Number(Bun.env.ARB_CROSS_BUDGET_MS ?? 15000);
 async function scan(): Promise<number> {
+  const scanT0 = Date.now();
   const myCycle = cycle++;
   const diag = myCycle % 10 === 0;
   const fullSweep = myCycle % 3 === 0;
@@ -1673,7 +1725,7 @@ async function scan(): Promise<number> {
     if (kind && !isBlocked(g.ev.slug, g.wm.slug, ge?.league, g.t) && (lP || (sP > Date.now() - 600000 && sP - Date.now() < PRE_WINDOW_MS))) {
       const fb = await addFeedJobs(g, sP, lP);
       const cross: CrossEntry[] = [];
-      if (ge && FEED_BOOKS.some((bk) => (fb as any)[bk])) {
+      if (ge && FEED_BOOKS.some((bk) => (fb as any)[bk]) && (lP || gmStore.has(ge.slug) || Date.now() - scanT0 < CROSS_BUDGET_MS)) {
         try {
           const gm = await gmCached(ge);
           const oA = gm.winner?.[g.lid], oB = gm.winner?.[g.sid];
@@ -1996,7 +2048,7 @@ async function scan(): Promise<number> {
     } catch (e: any) { console.error("spreads retire failed", e?.message ?? e); }
   };
 
-  await pool(jobs, 4, async (j) => {
+  const runJob = async (j: any) => {
     try {
       lastChecked.set(jk(j), Date.now());
       const sfx: string = j.sfx ?? "", bk: string = j.book ?? "goated";
@@ -2096,7 +2148,14 @@ async function scan(): Promise<number> {
         if (!hits.includes(key)) await sql`UPDATE arb_opps SET active = false WHERE opp_key = ${key} AND active`;
       }
     } catch (e: any) { console.error("compare failed", j.wm?.slug, e?.message ?? e); }
-  });
+  };
+  // Live games first. "scanned Xs ago" on the page is written as soon as the live pass is done, so a slow pre-match sweep can no longer make it look stale
+  // (what matters for staleness is how fresh the LIVE arbs are).
+  await pool(jobs.filter((j: any) => j.live), 4, runJob);
+  try { await sql`UPDATE arb_status SET last_scan = now() WHERE id = 1`; } catch {}
+  const preStart = Date.now();
+  const preJobs = jobs.filter((j: any) => !j.live).sort((x: any, y: any) => (lastChecked.get(jk(x)) ?? 0) - (lastChecked.get(jk(y)) ?? 0));   // most overdue first
+  await pool(preJobs, 4, async (j: any) => { if (Date.now() - preStart > PRE_BUDGET_MS) return; await runJob(j); });
   if (diag) console.log(`Matched games by sport: ${JSON.stringify(matchedPer)} (live ${live.length}, pre due ${pre.length}, ${fullSweep ? "full sweep" : "live-only"}) | by name: ${nmMatched} matched, ${nmUnmatched} unmatched | bet105 ${feedEvs.bet105.length} games/${feedN.bet105} matched, bovada ${feedEvs.bovada.length} games/${feedN.bovada} matched, gemini ${feedEvs.gemini.length} games/${feedN.gemini} matched | esports maps: ${pmMapGames.length} PM/${mapMatchedN} matched vs bovada | cross-book games: ${crossN} | blocked: ${blockedN} | fill-check drops: ${lqSkip} | over-cap drops (>${FEED_MAX_PCT}%): ${capSkip} | mem ${Math.round(process.memoryUsage().rss / 1048576)}MB`);
   await sql`UPDATE arb_opps SET active = false WHERE active AND last_seen < now() - interval '3 minutes'`;
   closeList.sort((a, b) => b.pct - a.pct);
