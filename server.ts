@@ -592,7 +592,7 @@ const GT_CONC = Number(Bun.env.ARB_GT_CONC ?? 3), GT_PAUSE_MS = Number(Bun.env.A
 // 5% per good answer once 15 s have passed without a 429, so it settles just under whatever Goated will accept.
 const GT_GAP_MS = Number(Bun.env.ARB_GT_GAP_MS ?? 300), GT_GAP_MIN = 150, GT_GAP_MAX = 1000;
 let gtGap = GT_GAP_MS, gtLast429 = 0;
-let gtActive = 0, gtPauseUntil = 0, gtNext = 0, gtPumping = false;
+let gtActive = 0, gtActiveLo = 0, gtPauseUntil = 0, gtNext = 0, gtPumping = false;
 let gtWake: (() => void) | null = null;
 const gtQ: { hi: (() => void)[]; lo: (() => void)[] } = { hi: [], lo: [] };
 function gtPump() {
@@ -602,25 +602,30 @@ function gtPump() {
     try {
       while (gtQ.hi.length || gtQ.lo.length) {
         if (gtActive >= GT_CONC) { await new Promise<void>((r) => { gtWake = r; }); continue; }
+        // the big catalogue refresh (lo) may use at most GT_CONC-1 slots, so a game-market lookup for a live game (hi) always finds one free
+        if (!gtQ.hi.length && gtActiveLo >= Math.max(1, GT_CONC - 1)) { await new Promise<void>((r) => { gtWake = r; }); continue; }
         const wait = Math.max(gtNext, gtPauseUntil) - Date.now();
         if (wait > 0) { await Bun.sleep(wait); continue; }
+        const isHi = gtQ.hi.length > 0;
         const grant = gtQ.hi.shift() ?? gtQ.lo.shift();
         if (!grant) continue;
         gtNext = Date.now() + gtGap;
         gtActive++;
+        if (!isHi) gtActiveLo++;
+        (grant as any).lo = !isHi;
         grant();
       }
     } finally { gtPumping = false; }
   })();
 }
 async function gtGate<T>(fn: () => Promise<T>, hi = false): Promise<T> {
-  await new Promise<void>((r) => { (hi ? gtQ.hi : gtQ.lo).push(r); gtPump(); });
+  await new Promise<void>((r) => { (hi ? gtQ.hi : gtQ.lo).push(r); if (hi) { const w = gtWake; gtWake = null; w?.(); } gtPump(); });   // a live-game lookup wakes the queue at once
   try { return await fn(); }
-  finally { gtActive--; const w = gtWake; gtWake = null; w?.(); gtPump(); }
+  finally { gtActive--; if (!hi) gtActiveLo--; const w = gtWake; gtWake = null; w?.(); gtPump(); }
 }
 // tries = how many 429 retries; the wait is capped at 3 s so one throttled call can no longer hold a whole scan for half a minute.
 async function gt(path: string, attempt = 0, tries = 3, hi = false): Promise<any> {
-  const r = await gtGate(() => fetch(GT + path, { headers: { "user-agent": UA, accept: "application/json" } }), hi);
+  const r = await gtGate(() => fetch(GT + path, { headers: { "user-agent": UA, accept: "application/json" }, signal: AbortSignal.timeout(12000) }), hi);
   if (r.status === 429) { gtPauseUntil = Math.max(gtPauseUntil, Date.now() + GT_PAUSE_MS); gtGap = Math.min(GT_GAP_MAX, Math.round(gtGap * 1.3)); gtLast429 = Date.now(); }
   else if (r.ok && Date.now() - gtLast429 > 15000) gtGap = Math.max(GT_GAP_MIN, gtGap * 0.95);
   if (r.status === 429 && attempt < tries) {
@@ -2060,10 +2065,14 @@ async function scan(): Promise<number> {
   };
 
   const runJob = async (j: any) => {
+    const jobT0 = Date.now();
+    let tBbo = 0, tGm = 0, tTots = 0, tSpr = 0;
     try {
       lastChecked.set(jk(j), Date.now());
       const sfx: string = j.sfx ?? "", bk: string = j.book ?? "goated";
-      const [bbo, gm] = await Promise.all([pm.markets.bbo(j.wm.slug), j.feed ? Promise.resolve(feedMarkets(j)) : gmCached(j.ge)]);
+      const bboP = pm.markets.bbo(j.wm.slug).finally(() => { tBbo = Date.now() - jobT0; });
+      const gmP = (j.feed ? Promise.resolve(feedMarkets(j)) : gmCached(j.ge)).finally(() => { tGm = Date.now() - jobT0; });
+      const [bbo, gm] = await Promise.all([bboP, gmP]);
       const gOdds = gm.winner;
       const d = bbo?.marketData;
       const hits: string[] = [];
@@ -2082,10 +2091,14 @@ async function scan(): Promise<number> {
           }
         }
         if (sane && j.byName && j.tots?.length && gm.totals.size) {
+          const tt0 = Date.now();
           try { await evalTotals(j, gm.totals); } catch (e: any) { console.error("totals failed", j.wm?.slug, e?.message ?? e); }
+          tTots = Date.now() - tt0;
         }
         if (sane && j.byName && j.sps?.length && gm.hand.length) {
+          const ts0 = Date.now();
           try { await evalSpreads(j, gm.hand); } catch (e: any) { console.error("spreads failed", j.wm?.slug, e?.message ?? e); }
+          tSpr = Date.now() - ts0;
         }
         if (gOdds) {
           const legs: { side: "a" | "b"; p: number; liq: number; other: string }[] = [];
@@ -2159,6 +2172,10 @@ async function scan(): Promise<number> {
         if (!hits.includes(key)) await sql`UPDATE arb_opps SET active = false WHERE opp_key = ${key} AND active`;
       }
     } catch (e: any) { console.error("compare failed", j.wm?.slug, e?.message ?? e); }
+    finally {
+      const took = Date.now() - jobT0;
+      if (took > 15000) console.log(`LIVE-JOB-SLOW ${j.live ? "live" : "pre"} ${j.wm?.slug}: ${(took / 1000).toFixed(0)}s [polymarket price ${(tBbo / 1000).toFixed(0)}s, ${j.feed ? "feed" : "goated markets"} ${(tGm / 1000).toFixed(0)}s, totals ${(tTots / 1000).toFixed(0)}s, spreads ${(tSpr / 1000).toFixed(0)}s, goated gap ${Math.round(gtGap)}ms, goated active ${gtActive}, queued ${gtQ.hi.length}+${gtQ.lo.length}]`);
+    }
   };
   // Live games first. "scanned Xs ago" on the page is written as soon as the live pass is done, so a slow pre-match sweep can no longer make it look stale
   // (what matters for staleness is how fresh the LIVE arbs are).
@@ -2301,19 +2318,21 @@ const waitingAt = new Map<number, number>();
 // PLAYER PROPS: the Polymarket list this scanner reads (events.list) has no prop markets at all, but a single game fetched with events.retrieveBySlug carries all of its
 // markets (744 for one NFL game), props included. So a card added from a prop fill ("Woody Marks 3+ receptions (YES)") is matched by fetching its game and looking for the
 // one market that mentions the player, the stat and the number. The market is saved with the card, and settles from Polymarket's own result like a game card.
-const propTried = new Map<number, number>();
+const propTried = new Map<string, number>();
 const looksLikeProp = (ev: string) => /receptions|rushing|passing|receiving|touchdown|yards|rebounds|assists|strikeouts|points|goals scored|\(middle|\bprop\b/i.test(ev);
 function parseProp(pick: string) {
   const m = /^(.+?)\s+(\d+(?:\.\d+)?)\+\s+(.+?)\s*\((YES|NO)\)\s*$/i.exec(pick.trim());   // "Woody Marks 3+ receptions (YES)"
   if (!m) return null;
   return { player: m[1].trim(), thr: m[2], statWords: nameToks(m[3]).map((w) => w.replace(/s$/, "")), long: m[4].toUpperCase() === "YES" };
 }
-async function findPmProp(t: any): Promise<{ slug: string; long: boolean } | null> {
-  if (Date.now() - (propTried.get(t.id) ?? 0) < 600000) return null;   // at most one lookup per card every 10 minutes
-  propTried.set(t.id, Date.now());
+async function findPmProp(t: any, thrOverride?: string): Promise<{ slug: string; long: boolean; yesIsLong: boolean } | null> {
+  const tkey = t.id + ":" + (thrOverride ?? "");
+  if (Date.now() - (propTried.get(tkey) ?? 0) < 600000) return null;   // at most one lookup per card (and threshold) every 10 minutes
+  propTried.set(tkey, Date.now());
   const pmIsA = t.a_book === "polymarket";
   const pick = String(pmIsA ? t.a_pick : t.b_pick);
   const pp = parseProp(pick);
+  if (pp && thrOverride) pp.thr = thrOverride;
   if (!pp) { console.log(`PROP-MATCH #${t.id}: can't read "${pick}" as "<player> <number>+ <stat> (YES/NO)"`); return null; }
   const hay = new Set(nameToks(String(t.event)));
   let gameSlug = "";
@@ -2341,12 +2360,49 @@ async function findPmProp(t: any): Promise<{ slug: string; long: boolean } | nul
     const sides: any[] = best[0].marketSides ?? [];
     const yes = sides.find((x: any) => /^yes$/i.test(String(x?.description ?? "")));
     const yesIsLong = yes ? yes.long !== false : true;
-    return { slug: String(best[0].slug), long: yesIsLong ? pp.long : !pp.long };
+    return { slug: String(best[0].slug), long: yesIsLong ? pp.long : !pp.long, yesIsLong };
   }
-  console.log(`PROP-MATCH #${t.id} ${pick}: ${best.length ? "several markets fit" : "no market fits"} (game ${gameSlug}, ${markets.length} markets, ${mentions.length} mention "${pp.player}"). Candidates: ` +
+  console.log(`PROP-MATCH #${t.id} ${pick}${thrOverride ? " at threshold " + thrOverride : ""}: ${best.length ? "several markets fit" : "no market fits"} (game ${gameSlug}, ${markets.length} markets, ${mentions.length} mention "${pp.player}"). Candidates: ` +
     (best.length ? best : mentions).slice(0, 12).map((m: any) => `[${m.slug} | ${String(m.question ?? "").slice(0, 90)} | sides ${(m.marketSides ?? []).map((x: any) => x.description + ":" + x.long).join("/")}]`).join(" "));
   return null;
 }
+// A MIDDLE card: the Polymarket leg won (stat >= its threshold). Whether the OTHER leg ("Under 23.5" / "Over 23.5") won too depends on the stat versus that line, and
+// Polymarket lists a market for the next whole number ("24+"), so its result answers it. true = the other leg won as well, false = it lost, null = can't tell.
+async function middleBookResult(t: any, pmIsA: boolean): Promise<boolean | null | "wait"> {
+  const bookPick = String(pmIsA ? t.b_pick : t.a_pick);
+  const bm = /(under|over)\s+(\d+(?:\.\d+)?)/i.exec(bookPick);
+  if (!bm) return null;
+  const need = String(Math.floor(Number(bm[2])) + 1);
+  const br = await findPmProp(t, need).catch(() => null);
+  if (!br) return null;
+  const bv = await pmSettlementValue(br.slug);
+  if (bv === null) return "wait";    // that market has not resolved yet: check again next time, no alert
+  if (!(Math.abs(bv - 1) < 0.01 || Math.abs(bv) < 0.01)) return null;
+  const statAtLeast = br.yesIsLong ? bv >= 0.5 : bv < 0.5;     // did the stat reach the next whole number?
+  return /over/i.test(bm[1]) ? statAtLeast : !statAtLeast;
+}
+async function probeBovadaTennis() {
+  const B = BVD_HOST + "/services/sports/event/coupon/events/A/description/";
+  const variants: [string, string][] = [
+    ["current", B + "tennis?marketFilterId=def&lang=en"],
+    ["limit50", B + "tennis?marketFilterId=def&preMatchOnly=false&eventsLimit=50&lang=en"],
+    ["no filter", B + "tennis?lang=en"],
+    ["atp", B + "tennis/atp?marketFilterId=def&lang=en"],
+    ["wta", B + "tennis/wta?marketFilterId=def&lang=en"],
+    ["v2", BVD_HOST + "/services/sports/event/v2/events/A/description/tennis?marketFilterId=def&lang=en"],
+    ["control basketball", B + "basketball?marketFilterId=def&lang=en"],
+  ];
+  for (const [label, url] of variants) {
+    try {
+      const r = await fetch(url, { headers: BVD_HEAD, signal: AbortSignal.timeout(15000) });
+      const txt = await r.text(); let j: any = null; try { j = JSON.parse(txt); } catch {}
+      const groups = Array.isArray(j) ? j : [];
+      const evs = groups.flatMap((g: any) => g?.events ?? []);
+      console.log(`BOVADA-TENNIS-PROBE ${label}: HTTP ${r.status}, ${txt.length} bytes, ${Array.isArray(j) ? groups.length + " groups, " + evs.length + " events, live " + evs.filter((e: any) => e.live).length : "not a list: " + txt.slice(0, 120).replace(/\s+/g, " ")}${groups.length ? " | first groups: " + groups.slice(0, 4).map((g: any) => (g.path ?? []).map((p: any) => p.link).join(">")).join(" ; ") : ""}`);
+    } catch (e: any) { console.log(`BOVADA-TENNIS-PROBE ${label} FAILED: ${String(e?.message ?? e).slice(0, 100)}`); }
+  }
+}
+setTimeout(() => void probeBovadaTennis(), 100_000);
 // is theScore reachable from here? (it has no official API; the old unofficial one is checked once and the answer written to the log)
 async function probeTheScore() {
   const day = new Date().toISOString().slice(0, 10);
@@ -2497,21 +2553,27 @@ async function settleOpenArbs() {
       const pmWon = pmLong ? v >= 0.5 : v < 0.5;
       // a MIDDLE (two lines on the same player) can have both legs win. If the Polymarket leg lost, the other leg is certain to have won; if it won, only the real final
       // stat says whether the other one did too, and this has no stat feed yet, so it asks you.
-      if (/\(middle/i.test(String(t.event)) && pmWon) {
-        noteOnce("middle", `Settle by hand: ${t.event}`, `Polymarket's leg won. This card is a middle, so the other book may have won too: check the final stat and settle it yourself.`);
-        continue;
-      }
       const pmLetter = pmIsA ? "a" : "b", otherLetter = pmIsA ? "b" : "a";
       const winner = pmWon ? pmLetter : otherLetter;
-      const returned = Number(winner === "a" ? t.a_payout : t.b_payout);
+      let returned = Number(winner === "a" ? t.a_payout : t.b_payout);
+      let bothWon = false;
+      if (/\(middle/i.test(String(t.event)) && pmWon) {
+        const other = await middleBookResult(t, pmIsA);
+        if (other === "wait") continue;
+        if (other === null) {
+          noteOnce("middle", `Settle by hand: ${t.event}`, `Polymarket's leg won. This card is a middle, so the other book may have won too, and I couldn't read the stat from Polymarket: check the final stat and settle it yourself.`);
+          continue;
+        }
+        if (other) { bothWon = true; returned = Number(t.a_payout) + Number(t.b_payout); }   // the middle hit: both legs paid
+      }
       const winPick = String(winner === "a" ? t.a_pick : t.b_pick), winBook = String(winner === "a" ? t.a_book : t.b_book);
       const res: any = await sql`UPDATE arb_tracker SET status = 'won', winner = ${winner}, returned = ${returned}, settled_at = now(),
-          note = coalesce(note || ' | ', '') || ${"auto-settled: Polymarket resolved " + (v >= 0.5 ? "side A" : "side B")}
+          note = coalesce(note || ' | ', '') || ${"auto-settled: Polymarket resolved " + (v >= 0.5 ? "side A" : "side B") + (bothWon ? " | middle hit: both legs won" : "")}
         WHERE id = ${t.id} AND status = 'open' RETURNING id`;
       if (!res?.length) continue;
       settled++;
       const profit = returned - total;
-      void ntfy(`Settled: ${t.event}`, `${winPick} (${winBook}) won. Returned $${returned.toFixed(2)} on $${total.toFixed(2)}: ${profit >= 0 ? "profit +" : "loss -"}$${Math.abs(profit).toFixed(2)}. Settled automatically from Polymarket.`, "default");
+      void ntfy(`Settled: ${t.event}`, `${bothWon ? "BOTH legs won, the middle hit." : `${winPick} (${winBook}) won.`} Returned $${returned.toFixed(2)} on $${total.toFixed(2)}: ${profit >= 0 ? "profit +" : "loss -"}$${Math.abs(profit).toFixed(2)}. Settled automatically from Polymarket.`, "default");
     }
   } catch (e: any) {
     console.error("ARB-SETTLE failed:", e?.message ?? e);
