@@ -225,27 +225,6 @@
     .tr-sum { grid-template-columns:repeat(2, minmax(0,1fr)); } .tr-top { grid-template-columns:1fr; } .tr-leg { grid-template-columns:repeat(2, minmax(0,1fr)); } }
 
   @media (max-width:420px) { .pct b { font-size:1.7rem; } .stake { font-size:1.15rem; } .odds { font-size:.95rem; } .leg { padding:12px; } }
-  /* windows up to 1400px wide (tablets, half-screen browsers): let the control row wrap instead of running off the page */
-  @media (max-width:1400px) { .ctl-right { flex-wrap:wrap; max-width:100%; } }
-  /* phones (<=560px): nothing runs off screen, controls + tracker buttons centered, bet boxes stacked */
-  @media (max-width:560px) {
-    .controls { justify-content:center; }
-    .ctl-right { flex-wrap:wrap; justify-content:center; width:100%; }
-    #trList .top > div:not(.pct):not(.midbox):not(.when):not(.vs) { grid-column:1 / -1 !important; }
-    #trList .top > .vs { grid-column:1 / -1 !important; text-align:left; align-self:start; }
-    #trList .top.mid { grid-template-columns:1fr auto !important; }
-    #trList .top.mid > .pct { grid-column:1; grid-row:1; }
-    #trList .top.mid > .when { grid-column:2; grid-row:1; }
-    #trList .top.mid > .midbox { grid-column:1 / -1 !important; grid-row:2; padding:6px 0 4px; }
-    #trList .top.mid > div:not(.pct):not(.midbox):not(.when):not(.vs) { grid-row:3; }
-    #trList .top.mid > .vs { grid-row:4; }
-    #trList .legs { grid-template-columns:1fr; }
-    #trList .leg + .leg { border-left:0; border-top:1px solid var(--border); }
-    .trbtns { justify-content:center; gap:8px; }
-    .trbtns .lbl { flex:0 0 100%; text-align:center; margin:0; }
-    .trbtn { flex:1 1 100%; text-align:center; white-space:normal; line-height:1.25; border-radius:14px; padding:10px 14px; }
-    .trbtn.danger { margin-left:0; }
-  }
   @media (prefers-reduced-motion:reduce) { .sniper i, .pulse::before, .empty .scope, .card { animation:none; } }
 
   /* ---------- screenshot tab ---------- */
@@ -304,7 +283,7 @@
       <button class="snd autobet" id="autobet" type="button">🤖 Auto Bettor: ON</button>
       <button class="snd autobet" id="vxauto" type="button">⚡ Server auto-fire: ...</button>
       <div class="bookf"><button type="button" id="bookfBtn">📚 Books</button><div class="bookf-pop" id="bookfPop" hidden></div></div>
-      <label class="bank"><span>BANKROLL $</span><input id="bank" type="number" inputmode="decimal" min="1" step="1" value="25"/></label>
+      <label class="bank"><span>BANKROLL $</span><input id="bank" type="number" inputmode="decimal" min="1" step="1" value="100"/></label>
       <label class="bank ceiling"><span>CEILING</span>
         <select id="ceilBook"><option value="">Off</option><option value="bovada">Bovada</option><option value="goated">Goated</option><option value="polymarket">Polymarket</option><option value="bet105">Bet105</option></select>
         <input id="ceilAmt" type="number" inputmode="decimal" min="1" step="1" placeholder="$ max"/>
@@ -493,7 +472,14 @@
     vxShow("Buying...", match + "\nThe sportsbook goes first, then Polymarket. Please wait.", 0);
     try {
       const bank = Math.max(2, Math.round(Number($("bank").value) || 5));
-      const resp = await fetch("/api/tracker/arb-buy", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: id, bankroll: bank, dry: false }) });
+      // buy what the card shows: its two amounts (including any typed in with the pencil) go with the click, so the buy spends those, not just the bankroll box
+      let stakes = null;
+      if (r0) {
+        const st = pairStakes(r0, bank), sbIsA = r0.book_a !== "polymarket";
+        const sbS = sbIsA ? st[0] : st[1], pmS = sbIsA ? st[1] : st[0];
+        if (sbS > 0 && pmS > 0) stakes = { sportsbook: Math.round(sbS * 100) / 100, polymarket: Math.round(pmS * 100) / 100 };
+      }
+      const resp = await fetch("/api/tracker/arb-buy", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: id, bankroll: bank, stakes: stakes, dry: false }) });
       const j = await resp.json().catch(() => ({}));
       if (j.error) { vxShow("Not bought", match + "\n" + j.error, 20000); }
       else {
@@ -708,7 +694,7 @@
   // auto-buy of the Polymarket Buy sheet once Goated reports placed), just started by the page instead of you.
   const autoClicked = new Set();
   const autoClickedEvents = new Set();
-  const AUTO_BANKROLL = 10; // fixed -- independent of the bankroll box on screen (which it now also defaults/syncs)
+  const AUTO_BANKROLL = 100; // the default for the bankroll box on screen (manual buys) and what auto-fire sizes off; the box remembers any change you type
   const AUTO_MIN_PCT = 4; // raised back up now that consistency is confirmed working
   // strip a trailing spread/total number ("Team A +3.5" -> "Team A") so the same real matchup is
   // recognized as one event even when it shows up as separate moneyline/spread/total arb rows
@@ -1344,28 +1330,14 @@
       '<div class="ret">pays ' + dollars(payout) + '</div>' + (t.status === "open" ? '<div class="ret" style="font-weight:700;color:var(--' + (payout - trTotal(t) >= 0 ? "win" : "loss") + ')">if wins ' + money(payout - trTotal(t)) + '</div>' : '') + '</div>' +
       '<span class="odds"><span class="logo lg-' + esc(book) + '">' + abbr + '</span>' + amer(odds) + '</span></div></div>';
   }
-  // ---------- arb P&L: realized profit per day (counted on the day each game started), month calendar + totals ----------
+  // ---------- arb P&L: realized profit per day (counted on the day each arb settled), month calendar + totals ----------
   let pnl = { rows: [], open: { n: 0, staked: 0, locked: 0 }, today: "" }, pnlMonth = "", pnlSel = "";
   const mny = (x) => (x < 0 ? "-$" : "+$") + Math.abs(x).toFixed(2);
   // compact amount for the small calendar cells: whole dollars from $10 up, one decimal under $10, "k" from $1,000
   const cmny = (x) => { const a = Math.abs(x); return (x < 0 ? "-$" : "+$") + (a >= 1000 ? (a / 1000).toFixed(1) + "k" : a >= 10 ? a.toFixed(0) : a.toFixed(1)); };
   const pcol = (x) => x > 0 ? "var(--win)" : x < 0 ? "var(--loss)" : "var(--fg)";
-  // the calendar counts each arb on the day its GAME STARTED (Pacific time); live bets with no start time count on the day they were placed
-  const ptDay = (v) => new Date(v).toLocaleDateString("en-CA", { timeZone: "America/Los_Angeles" });
-  const PNL_BOOK = { polymarket: "Polymarket", goated: "Goated", bet105: "Bet105", bovada: "Bovada", gemini: "Gemini", novig: "Novig", dexsport: "Dexsport", other: "Other" };
-  function pnlRows() {
-    const server = pnl.rows || [];
-    if (!tracks.length) return server; // tracker list not loaded yet: show what the server sent
-    const mine = tracks.filter((t) => t.status !== "open" && (t.event_start || t.placed_at)).map((t) => {
-      const staked = Number(t.a_stake) + Number(t.b_stake);
-      return { day: ptDay(t.event_start || t.placed_at), profit: Number(t.returned || 0) - staked, staked, event: t.event, books: [PNL_BOOK[t.a_book] || t.a_book, PNL_BOOK[t.b_book] || t.b_book], status: t.status };
-    });
-    if (tracks.length < 190) return mine; // the tracker list holds up to 200 entries; under that it is complete
-    const cut = ptDay(tracks.reduce((m, t) => (t.placed_at < m ? t.placed_at : m), tracks[0].placed_at));
-    return server.filter((r) => r.day < cut).concat(mine.filter((r) => r.day >= cut)); // older history still comes from the server
-  }
   function renderPnl() {
-    const rows = pnlRows(), curMonth = (pnl.today || new Date().toISOString().slice(0, 10)).slice(0, 7);
+    const rows = pnl.rows || [], curMonth = (pnl.today || new Date().toISOString().slice(0, 10)).slice(0, 7);
     if (!pnlMonth) pnlMonth = curMonth;
     const minMonth = rows.length ? rows.reduce((m, r) => (r.day.slice(0, 7) < m ? r.day.slice(0, 7) : m), curMonth) : curMonth;
     const byDay = {};
@@ -1394,7 +1366,7 @@
     }
     $("pnlGrid").innerHTML = cells;
     const o = pnl.open || {};
-    $("pnlFoot").innerHTML = "Profit counts on the day each game started (live bets count on the day they were placed). Right now: " + (o.n || 0) + " open, $" + Number(o.staked || 0).toFixed(2) + " in play, " + mny(Number(o.locked || 0)) + " locked in if they all settle clean.";
+    $("pnlFoot").innerHTML = "Profit counts on the day each arb settled. Right now: " + (o.n || 0) + " open, $" + Number(o.staked || 0).toFixed(2) + " in play, " + mny(Number(o.locked || 0)) + " locked in if they all settle clean.";
     const sel = byDay[pnlSel];
     $("pnlDetail").innerHTML = sel ? '<div class="pnl-day"><h4>' + esc(pnlSel) + ' · ' + mny(sel.profit) + ' on ' + sel.n + ' arb' + (sel.n > 1 ? "s" : "") + '</h4>' +
       sel.items.map((r) => '<div class="pnl-row"><span>' + esc(r.event) + '<small>' + esc((r.books || []).join(" + ")) + ' · $' + Number(r.staked).toFixed(2) + ' used' + (r.status === "other" ? ' · not a clean win' : '') + '</small></span><b style="color:' + pcol(r.profit) + '">' + mny(r.profit) + '</b></div>').join("") + '</div>' : "";
@@ -1417,11 +1389,11 @@
     const chip = open ? '<span class="tag new">OPEN</span>' : t.status === "won" ? '<span class="tag settled">SETTLED</span>' : '<span class="tag other">SETTLED</span>';
     const neg = profit < 0 ? ' style="color:var(--loss)"' : "";
     const sub = open ? "locked in · " : "profit · ";
-    let h = '<article class="card"><div class="top' + (/MIDDLE:/.test(t.note || "") ? ' mid" style="grid-template-columns:auto 1fr auto"' : '"') + '>' +
+    let h = '<article class="card"><div class="top">' +
       '<div class="pct"><b' + neg + '>' + (pct >= 0 ? "+" : "-") + Math.abs(pct).toFixed(2) + '%</b><span class="pill"' + neg + '>' + money(profit) + '</span></div>' +
-      (/MIDDLE:/.test(t.note || "") ? '<div class="midbox" style="text-align:center;align-self:center;white-space:nowrap"><div style="font-weight:800;letter-spacing:.04em;color:#f5b301">💰 Middles</div>' + (open ? '<div class="ret">pays ' + dollars(t.a_payout + t.b_payout) + '</div><div class="ret" style="font-weight:700;color:var(--win)">if wins ' + money(t.a_payout + t.b_payout - trTotal(t)) + '</div>' : '') + '</div>' : '') + '<div class="when">' + chip + '</div>' +
-      '<div' + (/MIDDLE:/.test(t.note || "") ? ' style="grid-column:1/3"' : '') + '><div class="sport">' + ICON(t.sport) + ' ' + esc(t.sport || "") + (t.league ? ' · ' + esc(t.league) : '') + (t.event_start ? ' · ' + esc(when(t.event_start)) : ' <span style="color:var(--loss);font-weight:700">· LIVE BET</span>') + '</div><div class="mkt">' + esc(t.event) + '</div></div>' +
-      '<div class="vs"' + (/MIDDLE:/.test(t.note || "") ? ' style="grid-column:3"' : '') + '>' + sub + 'in ' + dollars(trTotal(t)) + '<br/>' + (open ? "payout " + dollars(Math.min(t.a_payout, t.b_payout)) + " either way" : "returned " + dollars(t.returned)) + '</div></div>' + 
+      '<div class="when">' + chip + '</div>' +
+      '<div><div class="sport">' + ICON(t.sport) + ' ' + esc(t.sport || "") + (t.league ? ' · ' + esc(t.league) : '') + (t.event_start ? ' · ' + esc(when(t.event_start)) : ' <span style="color:var(--loss);font-weight:700">· LIVE BET</span>') + '</div><div class="mkt">' + esc(t.event) + '</div></div>' +
+      '<div class="vs">' + sub + 'in ' + dollars(trTotal(t)) + '<br/>' + (open ? "payout " + dollars(Math.min(t.a_payout, t.b_payout)) + " either way" : "returned " + dollars(t.returned)) + '</div></div>' + 
       '<div class="legs">' + trLeg("a", t) + trLeg("b", t) + '</div>';
     if (t.note) h += '<div class="trnote">' + esc(t.note) + '</div>';
     h += '<div class="trbtns">';
@@ -1453,7 +1425,7 @@
   async function loadTracker() {
     try {
       const d = await (await fetch("/api/tracker", { cache:"no-store" })).json();
-      tracks = d.rows || []; renderTracker(); renderPnl();
+      tracks = d.rows || []; renderTracker();
     } catch (e) { /* keep last view */ }
   }
   $("trList").addEventListener("click", async (e) => {
