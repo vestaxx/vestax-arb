@@ -413,6 +413,13 @@ async function sizeStakes(slug: string, long: boolean, dGt: number, dPm: number,
   if (!levels.length) return null;            // a real, empty book: nothing to buy
   return sizeFromLevels(levels, bankroll, dGt, dPm);
 }
+// Right before a buy: how much Polymarket cash is on offer at or under the break-even price for THESE stakes, read fresh. { failed: true } = the book could not be read.
+async function depthGuard(slug: string, long: boolean, dGt: number, dPm: number, sg: number, sp: number): Promise<{ depth: number; failed: boolean }> {
+  const { levels, failed } = await loadBookLevels(slug, long);
+  if (failed) return { depth: 0, failed: true };
+  if (!levels.length) return { depth: 0, failed: false };
+  return { depth: depthCash(levels, breakEvenPrice((sg + sp) / sg)), failed: false };
+}
 async function pmDepth(slug: string, long: boolean, dPm: number, dGt: number, topLiq: number): Promise<{ ok: boolean; depth: number; need: number; size?: number }> {
   const need = LIST_MIN_TOTAL;
   const { levels, failed } = await loadBookLevels(slug, long);
@@ -1766,16 +1773,17 @@ async function scan(): Promise<number> {
     console.log(`TT-ID-OVERLAP: ${tt.length} PM table tennis games | ${anySide} with >=1 side's id present in Goated's table tennis pool (${gtTtAllIds.size} ids) | ${bothSides} with both sides present | ${gtEvents.size ? "" : "(gtEvents empty)"}`);
   }
   let nmMatched = 0, nmUnmatched = 0, nmLogs = 0;
-  await pool(pmNameGames, 6, async (g) => {
+  await pool([...pmNameGames].sort((x: any, y: any) => (y.ev?.live ? 1 : 0) - (x.ev?.live ? 1 : 0)), 6, async (g) => {   // live games first
     const isLiveP = !!g.ev.live;
     const startP = Date.parse(g.ev.startTime ?? "");
     if (!isLiveP && !(startP > Date.now() - 600000 && startP - Date.now() < PRE_WINDOW_MS)) return;
     const fb = await addFeedJobs(g, startP, isLiveP);
     const mt = matchNameCached(g);
     const cross: CrossEntry[] = [];
-    if (mt && mt.lid && !isBlocked(g.ev.slug, g.wm.slug, mt.ge?.league)) {
+    // a pre-match game whose Goated markets are not cached yet is only fetched in the first CROSS_BUDGET_MS of a scan (later scans fill the cache); live games always are
+    if (mt && mt.lid && !isBlocked(g.ev.slug, g.wm.slug, mt.ge?.league) && (isLiveP || gmStore.has(mt.ge.slug) || Date.now() - scanT0 < CROSS_BUDGET_MS)) {
       try {
-        const gm = await gmCached(mt.ge);
+        const gm = await gmCached(mt.ge, isLiveP ? 20000 : 300000);
         const oA = gm.winner?.[mt.lid], oB = gm.winner?.[mt.sid];
         if (oA && oA > 1 && oB && oB > 1) {
           const isA = (name: string) => bestSim([name], g.Ln) > bestSim([name], g.Sn);
@@ -1809,6 +1817,7 @@ async function scan(): Promise<number> {
     const isLive = isLiveP || mt.ge.status === "live";
     queue({ ev: g.ev, wm: g.wm, L: { description: g.Lf || g.Ld }, S: { description: g.Sf || g.Sd }, lid: mt.lid, sid: mt.sid, ge: mt.ge, live: isLive, start: startP, byName: true, ptype: g.t, tots: g.tots, sps: g.sps }, isLive);
   });
+  const tNamesDone = Date.now();
   // esports map-level moneylines vs Bovada, entirely separate from the shared jobs pipeline above --
   // deliberately isolated (own matching, own math, own opp_key prefix "ME|") so a mistake here can't
   // touch any other sport. Bovada-only: no other feed book has confirmed per-map esports data, and
@@ -2186,7 +2195,7 @@ async function scan(): Promise<number> {
   const preJobs = jobs.filter((j: any) => !j.live).sort((x: any, y: any) => (lastChecked.get(jk(x)) ?? 0) - (lastChecked.get(jk(y)) ?? 0));   // most overdue first
   await pool(preJobs, 4, async (j: any) => { if (Date.now() - preStart > PRE_BUDGET_MS) return; await runJob(j); });
   const tPhaseC = Date.now();
-  scanPhases = `matching+cross ${((tPhaseA - scanT0) / 1000).toFixed(0)}s, live jobs ${((tPhaseB - tPhaseA) / 1000).toFixed(0)}s, pre-match jobs ${((tPhaseC - tPhaseB) / 1000).toFixed(0)}s (live ${live.length}, pre ${preJobs.length}), goated gap ${Math.round(gtGap)}ms`;
+  scanPhases = `matching+cross ${((tPhaseA - scanT0) / 1000).toFixed(0)}s, name-matched games (tennis/esports/TT) ${((tNamesDone - tPhaseA) / 1000).toFixed(0)}s, live jobs ${((tPhaseB - tPhaseA) / 1000).toFixed(0)}s, pre-match jobs ${((tPhaseC - tPhaseB) / 1000).toFixed(0)}s (live ${live.length}, pre ${preJobs.length}), goated gap ${Math.round(gtGap)}ms`;
   if (diag) console.log(`Matched games by sport: ${JSON.stringify(matchedPer)} (live ${live.length}, pre due ${pre.length}, ${fullSweep ? "full sweep" : "live-only"}) | by name: ${nmMatched} matched, ${nmUnmatched} unmatched | bet105 ${feedEvs.bet105.length} games/${feedN.bet105} matched, bovada ${feedEvs.bovada.length} games/${feedN.bovada} matched, gemini ${feedEvs.gemini.length} games/${feedN.gemini} matched | esports maps: ${pmMapGames.length} PM/${mapMatchedN} matched vs bovada | cross-book games: ${crossN} | blocked: ${blockedN} | fill-check drops: ${lqSkip} | over-cap drops (>${FEED_MAX_PCT}%): ${capSkip} | mem ${Math.round(process.memoryUsage().rss / 1048576)}MB`);
   await sql`UPDATE arb_opps SET active = false WHERE active AND last_seen < now() - interval '3 minutes'`;
   closeList.sort((a, b) => b.pct - a.pct);
@@ -2664,7 +2673,7 @@ button{margin-top:12px;width:100%;padding:12px;border:0;border-radius:999px;back
 <body><form method="GET" action="/"><img src="/logo.png" alt=""/><h1>VeSTAX ARBS</h1>
 <input name="key" type="password" placeholder="Passcode" autocomplete="current-password"/><button>Enter</button></form></body></html>`;
 
-const arbBuy = makeArbBuy({ sql, trade, tradeQuote, pmDecimal, wholePair, sizeStakes, ntfy, trackerAdd, legs: arbGoatedLegs, bvdLegs: arbBovadaLegs });
+const arbBuy = makeArbBuy({ sql, trade, tradeQuote, pmDecimal, wholePair, sizeStakes, depthGuard, ntfy, trackerAdd, legs: arbGoatedLegs, bvdLegs: arbBovadaLegs });
 Bun.serve({
   port: Number(Bun.env.PORT ?? 3000),
   async fetch(req) {

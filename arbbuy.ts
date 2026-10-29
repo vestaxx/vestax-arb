@@ -67,6 +67,11 @@ export function makeArbBuy(d: Deps) {
   // Auto-fire buys LIVE games only (pre-match arbs still show up on the page; you can still tap them yourself). ARB_AUTO_LIVE_ONLY=0 goes back
   // to the old rule of "live, or starting within ARB_AUTO_MAX_HOURS hours".
   const AUTO_LIVE_ONLY = Bun.env.ARB_AUTO_LIVE_ONLY !== "0";
+  // LIVE games move in a fraction of a second, and the sportsbook bet goes in BEFORE the Polymarket hedge (so a refused sportsbook bet leaves nothing exposed). To keep the
+  // hedge from vanishing in between, auto-fire only buys a live game when Polymarket has at least this many times the hedge cash on offer (a fresh read), and every buy
+  // re-reads the book once more right before the sportsbook bet goes in.
+  const AUTO_LIVE_DEPTH_MULT = Number(Bun.env.ARB_AUTO_LIVE_DEPTH_MULT ?? 3);
+  const RECHECK_DEPTH_MULT = Number(Bun.env.ARB_RECHECK_DEPTH_MULT ?? 1.2);
   const farNoted = new Map<string, number>();
   const isLoginErr = (e: string) => /NotLoggedIn|Please log in|log in to place/i.test(e);
 
@@ -88,7 +93,7 @@ export function makeArbBuy(d: Deps) {
     }
     const bankroll = userStakes ? Math.max(2, Math.round(userStakes.sb + userStakes.pm)) : Math.min(capUsd, Math.max(2, Math.round(Number(body?.bankroll ?? DEFAULT_BANK) || DEFAULT_BANK)));
 
-    const [row]: any = await sql`SELECT opp_key, sport, league, player_a, player_b, profit_pct FROM arb_opps WHERE id = ${id} AND active`;
+    const [row]: any = await sql`SELECT opp_key, sport, league, player_a, player_b, profit_pct, is_live FROM arb_opps WHERE id = ${id} AND active`;
     if (!row) throw new Error("That arb isn't active any more.");
     const key = String(row.opp_key);
     const m = /^([^|~]+)\|([ab])(~bvd)?$/.exec(key);
@@ -153,6 +158,13 @@ export function makeArbBuy(d: Deps) {
     if (body?.triggeredBy === "auto" && sg + sp < AUTO_MIN_TOTAL)
       throw new Error(`Only $${sg + sp} fits Polymarket's depth here (auto-fire needs at least $${AUTO_MIN_TOTAL} in total). Nothing was bought.`);
     const sizedByDepth = !!sized && sg + sp < bankroll * 0.9;
+    const isLive = !!row.is_live;
+    const needDepthMult = body?.triggeredBy === "auto" && isLive ? AUTO_LIVE_DEPTH_MULT : 0;
+    if (needDepthMult && d.depthGuard) {
+      const g0: any = await d.depthGuard(pmSlug, long, dGt, dPm, sg, sp);
+      if (g0.failed) throw new Error("Live game: Polymarket's order book could not be read, so auto-fire skips it. Nothing was bought.");
+      if (g0.depth < needDepthMult * sp) throw new Error(`Live game: Polymarket has only $${Math.round(g0.depth)} on offer for a $${sp} hedge (auto-fire needs ${needDepthMult}x). Nothing was bought.`);
+    }
 
     // check the Polymarket leg is buyable at these exact numbers BEFORE touching the sportsbook
     const tradeBody: any = { id, cash: sp, stake: sg, payout: sg * dGt };
@@ -170,6 +182,16 @@ export function makeArbBuy(d: Deps) {
       expectedProfitUsd: Math.round((q.profitNow ?? 0) * 100) / 100, bankroll, sizedByDepth, fromCard: !!userStakes, totalStaked: sg + sp,
     };
     if (dry) return plan;
+
+    // One more fresh look at Polymarket's book RIGHT before the sportsbook bet goes in (the first look was before the quote and the sizing). If the hedge room has
+    // shrunk since, stop here: nothing has been bought yet. Live auto-buys need the full multiple again; everything else needs 20% more than the hedge cash.
+    if (d.depthGuard) {
+      const g1: any = await d.depthGuard(pmSlug, long, dGt, dPm, sg, sp);
+      const mult = needDepthMult || RECHECK_DEPTH_MULT;
+      if (g1.failed ? !!needDepthMult : g1.depth < mult * sp)
+        throw new Error(g1.failed ? "Live game: Polymarket's order book could not be read just before buying, so auto-fire stopped. Nothing was bought."
+          : `Polymarket's book changed just before buying: $${Math.round(g1.depth)} on offer for a $${sp} hedge (needs ${mult}x). Nothing was bought.`);
+    }
 
     if (busy.has(id)) throw new Error("A buy for this arb is already running.");
     if (Date.now() - (recent.get(key) ?? 0) < 60000) throw new Error("This arb was just bought. Wait a minute before buying it again.");
