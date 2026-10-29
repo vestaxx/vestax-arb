@@ -72,6 +72,13 @@ export function makeArbBuy(d: Deps) {
   // re-reads the book once more right before the sportsbook bet goes in.
   const AUTO_LIVE_DEPTH_MULT = Number(Bun.env.ARB_AUTO_LIVE_DEPTH_MULT ?? 3);
   const RECHECK_DEPTH_MULT = Number(Bun.env.ARB_RECHECK_DEPTH_MULT ?? 1.2);
+  // On a LIVE game of a major league (NBA, NFL, NHL, MLB), Polymarket's price for a longshot (or a near-lock) sits in a thin part of the book and can double in the few seconds
+  // between the check and the order. (Oct 28: the Jazz hedge read about 10c on a live NBA overtime game and was 20c when the order arrived, with the Bovada bet already in.)
+  // Auto-fire only buys those games when the Polymarket price is between these two. (Real live arbs over 5% do happen -- Eagles/Jaguars 8.6%, Colgate/Richmond 5.5% -- and had
+  // Polymarket prices around 55c, so the size of the edge is NOT what this looks at.)
+  const AUTO_LIVE_MAJOR_PM_MIN = Number(Bun.env.ARB_AUTO_LIVE_MAJOR_PM_MIN ?? 0.2);
+  const AUTO_LIVE_MAJOR_PM_MAX = Number(Bun.env.ARB_AUTO_LIVE_MAJOR_PM_MAX ?? 0.85);
+  const MAJOR_LEAGUE_SPORTS = /basketball|american football|hockey|baseball/i;
   const farNoted = new Map<string, number>();
   const isLoginErr = (e: string) => /NotLoggedIn|Please log in|log in to place/i.test(e);
 
@@ -136,6 +143,8 @@ export function makeArbBuy(d: Deps) {
       throw new Error(`Fight with a possible draw: auto-fire only buys the Polymarket side when it is the underdog (at or under ${Math.round(FIGHT_MAX_PM_PRICE * 100)}c), and it is ${(p0 * 100).toFixed(1)}c. Nothing was bought.`);
     const dPm = d.pmDecimal(p0);
     const pct = (1 / (1 / dPm + 1 / dGt) - 1) * 100;
+    if (body?.triggeredBy === "auto" && row.is_live && MAJOR_LEAGUE_SPORTS.test(String(row.sport ?? "")) && (p0 < AUTO_LIVE_MAJOR_PM_MIN || p0 > AUTO_LIVE_MAJOR_PM_MAX))
+      throw new Error(`Live ${row.sport}: the Polymarket price is ${(p0 * 100).toFixed(0)}c, outside the ${Math.round(AUTO_LIVE_MAJOR_PM_MIN * 100)}-${Math.round(AUTO_LIVE_MAJOR_PM_MAX * 100)}c band auto-fire trusts on a live major-league game (the thin ends of the book can double between the check and the order). Nothing was bought.`);
     const needPct = body?.triggeredBy === "auto" ? Math.max(MIN_PCT, AUTO_MIN_VERIFIED_PCT) : MIN_PCT;
     if (pct < needPct) throw new Error(`The edge is only ${pct.toFixed(2)}% on the fresh prices (needs ${needPct}%). Nothing was bought.`);
 
