@@ -893,6 +893,12 @@ const gmCached = (ge: any, maxAge?: number) => {
   gmStore.set(ge.slug, ent);
   return ent.p;
 };
+// true when gmCached would answer from its cache right now WITHOUT a new Goated request. (gmStore.has() was used for this before, but an entry that is merely present can be
+// expired, and asking gmCached for an expired one starts a fresh request that waits in Goated's throttled queue: with ~700 Goated games that made the scan take 2 minutes.)
+const gmServable = (ge: any, maxAge?: number) => {
+  const e = gmStore.get(ge.slug);
+  return !!e && Date.now() - e.at < (e.ok && maxAge ? Math.max(e.ttl, maxAge) : e.ttl);
+};
 type FeedEv = { teams: [string, string]; spreads: { team: string; line: number; odds: number }[]; totals: { line: number; over?: number; under?: number }[]; ml: Record<string, number>; live: boolean; start?: number; url?: string; link?: string; league?: string; sport?: string; mapMl?: Record<number, Record<string, number>>; mlIds?: Record<string, string>; bid?: string; home?: string };
 const feeds: Record<string, Map<string, { at: number; ev: FeedEv }>> = { bet105: new Map(), bovada: new Map(), gemini: new Map() };
 const FEED_BOOKS = ["bet105", "bovada", "gemini"];
@@ -1747,7 +1753,7 @@ async function scan(): Promise<number> {
     if (kind && !isBlocked(g.ev.slug, g.wm.slug, ge?.league, g.t) && (lP || (sP > Date.now() - 600000 && sP - Date.now() < PRE_WINDOW_MS))) {
       const fb = await addFeedJobs(g, sP, lP);
       const cross: CrossEntry[] = [];
-      if (ge && FEED_BOOKS.some((bk) => (fb as any)[bk]) && (lP || gmStore.has(ge.slug) || Date.now() - scanT0 < CROSS_BUDGET_MS)) {
+      if (ge && FEED_BOOKS.some((bk) => (fb as any)[bk]) && (lP || gmServable(ge, 300000) || Date.now() - scanT0 < CROSS_BUDGET_MS)) {
         try {
           const gm = await gmCached(ge, lP ? 20000 : 300000);
           const oA = gm.winner?.[g.lid], oB = gm.winner?.[g.sid];
@@ -1781,7 +1787,7 @@ async function scan(): Promise<number> {
     const mt = matchNameCached(g);
     const cross: CrossEntry[] = [];
     // a pre-match game whose Goated markets are not cached yet is only fetched in the first CROSS_BUDGET_MS of a scan (later scans fill the cache); live games always are
-    if (mt && mt.lid && !isBlocked(g.ev.slug, g.wm.slug, mt.ge?.league) && (isLiveP || gmStore.has(mt.ge.slug) || Date.now() - scanT0 < CROSS_BUDGET_MS)) {
+    if (mt && mt.lid && !isBlocked(g.ev.slug, g.wm.slug, mt.ge?.league) && (isLiveP || gmServable(mt.ge, 300000) || Date.now() - scanT0 < CROSS_BUDGET_MS)) {
       try {
         const gm = await gmCached(mt.ge, isLiveP ? 20000 : 300000);
         const oA = gm.winner?.[mt.lid], oB = gm.winner?.[mt.sid];
